@@ -322,7 +322,7 @@ def predict():
     cfg = load_config()
     latest = find_latest_model(cfg.artifacts_dir)
     csv_options = _trace_file_options()
-    selected_data_path = cfg.data_path
+    selected_data_path = _active_trace_path(cfg) or cfg.data_path
     summary = None
 
     if request.method == "POST":

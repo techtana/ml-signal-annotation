@@ -25,7 +25,7 @@ def annotation_path_for(trace_path: str) -> Path:
 
 @dataclass(frozen=True)
 class CnnConfig:
-    data_path: str = "data/traces/traces.csv"
+    data_path: str = "data/traces/sample_a_traces.csv"
     output_path: str = "data/predictions/predictions.csv"
 
     group_by_col: str = "run_id"
