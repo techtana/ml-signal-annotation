@@ -9,91 +9,206 @@ A toolkit for interactive time-series annotation and multi-source tabular regres
 Two loosely coupled components:
 
 **Component 1 — Interactive Annotation + CNN Regressor**  
-Annotate multi-channel time-series samples by clicking on a plot, then train a CNN to predict the labeled position automatically.
+Annotate multi-channel time-series samples by clicking on a plot, then train a CNN to predict the labeled position automatically. Available as both a Flask web app (browser-based, no matplotlib required) and as standalone CLI scripts.
 
 **Component 2 — Tabular Regression Pipeline**  
 Query data from multiple sources, merge and engineer features, train PLS regression models per job, and browse results via a Flask dashboard.
 
 ---
 
-## Project Structure
+## First-time setup
+
+### 1. Clone and create a virtual environment
+
+```bash
+git clone <repo-url>
+cd ml-cnn-annotation-tool
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# macOS / Linux
+source .venv/bin/activate
+```
+
+### 2. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+For GPU support on **native Windows** (TensorFlow ≥ 2.11 dropped CUDA on Windows):
+
+```bash
+pip install tensorflow-directml-plugin
+```
+
+This installs Microsoft's DirectML backend, which works on NVIDIA and AMD GPUs without WSL2. On Linux or WSL2, standard CUDA/TensorFlow GPU works out of the box.
+
+### 3. Start the Flask web app
+
+```bash
+# Windows (PowerShell)
+$env:FLASK_APP = "app/app.py"
+flask run --host 0.0.0.0 --port 8972
+
+# macOS / Linux
+FLASK_APP=app/app.py flask run --host 0.0.0.0 --port 8972
+
+# Or run directly
+python app/app.py
+```
+
+Open **http://localhost:8972** in your browser.
+
+### 4. Walk through the workflow
+
+1. **Choose trace file** (`/cnn/source`) — select one of the bundled sample CSVs from `data/traces/` or upload your own.
+2. **Annotate** (`/cnn/annotate`) — click on the Plotly chart to label the event position for each sample. Labels are saved to `data/annotations/` as a companion file; the original trace CSV is never modified.
+3. **Train** (`/cnn/train`) — runs the CNN regressor in-process. Predictions are written to `data/predictions/`.
+4. **Predict** (`/cnn/predict`) — load a saved model and run inference on any trace file. Toggle between a table and a per-sample trace plot with the predicted position overlaid.
+
+---
+
+## Project structure
 
 ```
+├── app/                         # Flask web app (Component 1 UI)
+│   ├── __init__.py              # create_app() factory
+│   ├── app.py                   # entrypoint (flask run / python app.py)
+│   ├── routes/
+│   │   ├── cnn.py               # CNN workflow routes (/cnn/*)
+│   │   ├── pipeline_dashboard.py # Pipeline jobs dashboard (/pipeline/*)
+│   │   └── core.py              # Root redirect
+│   ├── services/
+│   │   ├── cnn_pipeline.py      # load_and_group, build_model, train_and_predict, predict_only
+│   │   ├── annotations.py       # read/write annotation files (separate from trace CSVs)
+│   │   ├── config_store.py      # persist CnnConfig to artifacts/web/cnn_config.json
+│   │   ├── state.py             # annotation session state (current sample index)
+│   │   └── trace_files.py       # temp-upload helpers
+│   ├── templates/
+│   │   ├── base.html            # Bootstrap 5 shell + navbar
+│   │   ├── cnn/                 # source, annotate, train, predict, settings pages
+│   │   └── pipeline/            # jobs, job detail pages
+│   └── static/
+│       ├── app.css
+│       └── prediction_template.csv
+│
 ├── annotation/
-│   ├── interactive.py       # interactive matplotlib annotation classes
-│   └── annotate.py          # annotation-only script (no training)
+│   ├── interactive.py           # InteractiveAnnotation_2dplot / _heatmap (matplotlib)
+│   └── annotate.py              # standalone annotation CLI (no training)
+│
 ├── modeling/
-│   ├── pipeline.py          # full tabular regression pipeline
-│   └── import_config.py     # bulk-import job definitions from CSV
-├── dashboard/
-│   ├── app.py               # Flask results dashboard
-│   └── templates/
-│       ├── entry.html
-│       └── table.html
+│   ├── pipeline.py              # tabular regression pipeline (Component 2)
+│   └── import_config.py         # bulk-import job definitions from CSV
+│
 ├── utils/
-│   ├── preprocess.py        # normalization, feature engineering, plotting
-│   ├── io.py                # JSON config helpers, section printer
-│   └── spark.py             # PySpark / Hive query utilities
-├── notebooks/               # prototype notebooks
-├── train.py                 # full annotation + CNN training script
-└── config.json              # pipeline job config
+│   ├── preprocess.py            # normalize, equalize_length, plot_training_history
+│   ├── io.py                    # JSON config helpers, section printer
+│   └── spark.py                 # PySpark / Hive query utilities
+│
+├── data/
+│   ├── traces/                  # input trace CSVs (read-only during the workflow)
+│   ├── annotations/             # one annotation CSV per trace, never merged back
+│   └── predictions/             # model output CSVs
+│
+├── artifacts/                   # saved Keras models + app config
+├── train.py                     # CLI: annotate + train in one pass
+├── requirements.txt
+└── config.json                  # Component 2 job definitions
 ```
 
 ---
 
 ## Component 1: Interactive Annotation & CNN Regressor
 
-### What it does
+### Architecture
 
-Given a collection of multi-channel time-series samples (e.g., multiple sensor channels recorded over time for each experiment run), this component lets you:
-
-- Visualize each trace interactively
-- Click on the plot to mark an event or endpoint for that trace
-- Save all annotations to a CSV
-- Train a CNN regressor to predict the labeled position from the raw trace
-
-Typical use cases: detecting process endpoints, transition points, anomaly onset, or any time-indexed event in sensor data.
-
-### Quick start
-
-**Step 1 — Prepare your data**
-
-Your input CSV needs:
-- A run/experiment ID column (e.g., `run_id`)
-- A time index column (e.g., `elapsed_time`)
-- One or more sensor/channel columns
+The Flask app is structured as a single-page-per-step workflow with three layers:
 
 ```
-run_id, elapsed_time, channel_1, channel_2, ..., channel_N
+Browser (Plotly.js + Bootstrap 5)
+    │  click events → POST /cnn/annotate/label (JSON)
+    │  sample data  ← GET  /cnn/predict/sample-data (JSON)
+    ▼
+Routes (app/routes/cnn.py)
+    │  thin controllers: validate input, call services, render templates
+    ▼
+Services (app/services/)
+    ├── cnn_pipeline.py   — TensorFlow/Keras model logic, data loading
+    ├── annotations.py    — annotation file I/O
+    ├── config_store.py   — persistent settings (artifacts/web/cnn_config.json)
+    └── state.py          — per-session annotation position (which sample is next)
 ```
 
-**Step 2 — Annotation only**
+**Data is kept in separate files by type:**
 
-Edit the parameters at the top of [annotation/annotate.py](annotation/annotate.py) and run:
+| Folder | Contents | Written by |
+|---|---|---|
+| `data/traces/` | Input CSVs — never modified | User / upload |
+| `data/annotations/` | `{trace_stem}_annotations.csv` | Annotation step |
+| `data/predictions/` | `{name}_predictions.csv` | Train / Predict step |
+| `artifacts/` | `cnn_regressor_YYYYMMDD_HHMMSS.keras`, app config | Training step |
+
+### CNN model
+
+Input shape: `(time_steps, num_channels, 1)`
+
+```
+Input → Conv2D(32, kernel=(5,1)) → MaxPool(2,1)
+      → Conv2D(64, kernel=(5,1)) → MaxPool(2,1)
+      → Flatten → Dense(max_len, relu) → Dense(1, linear)
+```
+
+- Kernels are `(5, 1)` — they convolve along the time axis only, treating each channel independently.
+- Pooling is `(2, 1)` for the same reason: time is downsampled, channel count is preserved.
+- Loss: MSE. Output: normalized scalar scaled back to physical time units.
+
+### Web app pages
+
+| URL | Purpose |
+|---|---|
+| `/cnn/source` | Select or upload a trace CSV |
+| `/cnn/annotate` | Interactive Plotly chart; click to label; Prev/Next/Skip navigation |
+| `/cnn/train` | Run CNN training in-process; shows annotated count + training summary |
+| `/cnn/predict` | Run inference with a saved model; toggle between result table and trace plot |
+| `/cnn/settings` | Edit all pipeline parameters (paths, hyperparameters, GPU options) |
+| `/cnn/download-sample` | Download a ZIP of sample trace + annotation CSVs |
+
+### GPU configuration
+
+Settings page exposes two fields:
+
+| Setting | Default | Behaviour |
+|---|---|---|
+| `use_gpu` | `True` | If `False`, TensorFlow hides all GPUs; trains on CPU |
+| `gpu_memory_fraction` | `None` (blank) | `None` = memory growth on demand; `0.8` = reserve 80 % of VRAM upfront |
+
+On **native Windows**, install `tensorflow-directml-plugin` (see setup above). On Linux/WSL2, standard CUDA works with no extra steps.
+
+### Standalone CLI (no browser needed)
+
+**Annotation only:**
 
 ```bash
 python -m annotation.annotate
 ```
 
-A single matplotlib window opens and is reused for every sample — the plot updates in-place rather than closing and reopening. Click anywhere on the x-axis to mark the event position and advance to the next sample. If `OUTPUT_PATH` already exists on disk the annotation step is skipped entirely and the existing file is used.
+A single matplotlib window opens and reuses the same figure for every sample. A dashed vertical line follows the mouse; click anywhere on the x-axis to record the label and advance to the next sample. Edit parameters at the top of [annotation/annotate.py](annotation/annotate.py).
 
-**Step 3 — Annotate + train in one pass**
-
-Edit the parameters at the top of [train.py](train.py) and run:
+**Annotate + train in one pass:**
 
 ```bash
 python train.py
 ```
 
-This annotates (or loads existing annotations), trains a CNN, and saves per-sample predictions to `OUTPUT_PATH`. The model is saved under `artifacts/`.
-
-### Parameters (`train.py`)
+Edit parameters at the top of [train.py](train.py):
 
 | Parameter | Default | Description |
 |---|---|---|
 | `DATA_PATH` | `data/traces.csv` | Input time-series CSV |
-| `ANNOTATION_PATH` | `data/annotations.csv` | Annotation file to write or load |
-| `OUTPUT_PATH` | `data/predictions.csv` | Per-sample prediction output |
+| `ANNOTATION_PATH` | `data/annotations.csv` | Existing annotation file to load |
+| `OUTPUT_PATH` | `data/output.csv` | Unified output (traces + annotations + predictions) |
+| `CACHE_PATH` | `data/.session_cache.pkl` | Session cache — delete to reset |
 | `GROUP_BY_COL` | `run_id` | Column used to group samples |
 | `TIME_INDEX_COL` | `elapsed_time` | Time / x-axis column |
 | `CHANNEL_COLS` | `None` | Channel columns; `None` = all non-index columns |
@@ -103,39 +218,23 @@ This annotates (or loads existing annotations), trains a CNN, and saves per-samp
 | `BATCH_SIZE` | `200` | Training batch size |
 | `NUM_EPOCHS` | `100` | Training epochs |
 | `USE_GPU` | `True` | Use GPU if available; falls back to CPU automatically |
-| `GPU_MEMORY_FRACTION` | `None` | VRAM fraction to reserve (e.g. `0.8`); `None` = dynamic growth |
+| `GPU_MEMORY_FRACTION` | `None` | VRAM fraction to reserve; `None` = dynamic growth |
 
-### GPU configuration
+The CLI keeps everything in memory and writes a single unified output CSV (`OUTPUT_PATH`) containing the original trace rows plus `annotation` and `predicted_position` columns. A pickle cache (`CACHE_PATH`) preserves annotations and predictions between runs — delete it to start fresh.
 
-`configure_gpu()` is called before any Keras operations and handles three cases:
+### Sample data
 
-| `USE_GPU` | GPU present | Behaviour |
-|---|---|---|
-| `False` | — | GPU hidden from TensorFlow; trains on CPU |
-| `True` | No | Prints a warning and falls back to CPU |
-| `True` | Yes | Enables memory growth (`GPU_MEMORY_FRACTION=None`) or reserves a fixed VRAM slice |
+Five generated datasets in `data/traces/`:
 
-`GPU_MEMORY_FRACTION=None` (the default) lets TensorFlow allocate memory on demand — recommended on shared machines. Set it to a value like `0.8` to pre-reserve 80 % of VRAM for more deterministic performance on a dedicated GPU.
+| File | Runs | Steps | Channels | Pre-annotated |
+|---|---|---|---|---|
+| `sample_a_traces.csv` | 10 | 100 | 3 | No |
+| `sample_b_traces.csv` | 25 | 150 | 5 | Yes (15 samples) |
+| `sample_c_traces.csv` | 40 | 200 | 2 | No |
+| `sample_d_traces.csv` | 15 | 80 | 7 | Yes (10 samples) |
+| `sample_e_traces.csv` | 60 | 120 | 4 | No |
 
-### Annotation classes (`annotation/interactive.py`)
-
-**`InteractiveAnnotation_2dplot(data, plottitle=None)`**  
-Multi-line 2D plot. Click → integer x index returned.
-
-**`InteractiveAnnotation_heatmap(data)`**  
-Heatmap view. Click → float x value returned.
-
-Both expose `.annotate(fig=None, ax=None)`. When `fig` and `ax` are omitted a standalone window is created and closed after the click. When passed in, the axes are updated in-place and the window stays open — this is how the annotation loop in `annotate.py` and `train.py` keeps a single persistent window.
-
-### CNN architecture
-
-Input shape: `(time_steps, num_channels, 1)`
-
-```
-Conv2D(32, kernel=(5,1)) → MaxPool → Conv2D(64, kernel=(5,1)) → MaxPool → Flatten → Dense → Dense(1, linear)
-```
-
-Loss: MSE. Output: normalized scalar in `[0, 1]`, scaled back to physical units using the time-index range.
+Pre-annotated companion files are in `data/annotations/`. Each trace has a sigmoid-shaped event at a random position (30–70 % through the trace) with Gaussian noise per channel.
 
 ---
 
@@ -164,7 +263,7 @@ python -m modeling.pipeline [config.json] [--verbose] [--reset] [--reset-model]
 
 ### Config reference (`config.json`)
 
-Each object in the JSON array defines one job. Edit the example `config.json` to match your data sources.
+Each object in the JSON array defines one job.
 
 | Field | Type | Description |
 |---|---|---|
@@ -177,57 +276,36 @@ Each object in the JSON array defines one job. Edit the example `config.json` to
 | `target_items` | list | Target (Y) items — each `{source_step, name, limits}` |
 | `feature_items` | list | Additional tabular X columns to include |
 | `run_params_enable` | int | `1` to include run-level recipe parameters as features |
-| `modelgroup` | str | Column name to split modeling into subgroups (`""` = one model) |
+| `modelgroup` | str | Column to split modeling into subgroups (`""` = one model) |
 | `data_conversion` | dict | Regex → conversion type (e.g. `{"^run_param::(.*)Time": "hms_to_seconds"}`) |
 | `position_type` | str | How to interpret position data: `"chamber"` or `"slot"` |
 | `position_column` | str | Column name that holds the position identifier |
 
-After a successful run, the pipeline writes back:
-- `TargetDF`, `FeatureDF`, `RunParamDF`, `SensorDF`, `MergedDF`, `ProcessedDF`, `PivotedDF`, `FilteredDF` — parquet file paths
-- `ModelFile` — pickled PLS model path
-- `R2`, `RMSE`, `N`, `Y-Range` — model metrics
-- `plots` — list of actual-vs-predicted plot paths
-
-### Adding jobs in bulk
-
-Populate a CSV with one row per job (columns matching `modeling/import_config.py`), then:
-
-```bash
-python -m modeling.import_config
-```
+After a successful run, the pipeline writes back parquet paths, model path, and metrics (`R2`, `RMSE`, `N`, `Y-Range`) directly into `config.json`.
 
 ### Flask dashboard
 
 ```bash
-export FLASK_APP=app/app.py
-flask run --host=0.0.0.0 --port=8972
+FLASK_APP=app/app.py flask run --host 0.0.0.0 --port 8972
 ```
 
-- `/jobs` — table of all jobs with status and error fields
-- `/job?id=<N>` — full config JSON for job at index N
+- `/pipeline/jobs` — table of all jobs with status
+- `/pipeline/job?id=<N>` — full config JSON for job N
+
+### PySpark / database setup
+
+Set environment variables before running:
+
+```bash
+export MEASUREMENT_DB=your_measurement_database
+export SENSOR_DB=your_sensor_database
+```
+
+Create `hive_schema.json` at the project root mapping `{db: {table: [columns]}}`. Adapt table and column names in [utils/spark.py](utils/spark.py) to match your actual schema.
 
 ---
 
-## PySpark / Database Setup (`utils/spark.py`)
-
-The `SparkSession` wrapper assumes your data is in Hive/Hadoop tables. Before using the pipeline:
-
-1. Set environment variables (or edit `modeling/pipeline.py` directly):
-   ```bash
-   export MEASUREMENT_DB=your_measurement_database
-   export SENSOR_DB=your_sensor_database
-   ```
-
-2. Create `hive_schema.json` at the project root mapping `{db: {table: [columns]}}` — the pipeline uses this to validate context keys before building queries.
-
-3. Adapt the table and column names in `utils/spark.py` to match your actual schema. The generic names used internally are:
-   - `measurement_wafer_summary`, `measurement_summary`, `measurement_run_summary`, `measurement_items`
-   - `sensor_summary`, `sensor_point`, `tool_registry`, `run_context`
-   - Key columns: `batch_id`, `item_id`, `run_date`, `workflow_step`, `data_item_id`, `value`, `RECIPE_NAME`
-
----
-
-## Data Flow (Component 2)
+## Data flow (Component 2)
 
 ```
 [Target measurements]     ──┐
@@ -236,24 +314,29 @@ The `SparkSession` wrapper assumes your data is in Hive/Hadoop tables. Before us
 [Step-level sensor data]  ──┘
 ```
 
-Intermediate DataFrames are cached as Parquet. File paths are stored back in `config.json` so subsequent runs skip re-querying unchanged data (controlled by `extract_date` and a 14-day reset window).
+Intermediate DataFrames are cached as Parquet. File paths are stored back in `config.json` so subsequent runs skip re-querying unchanged data.
 
 ---
 
 ## Dependencies
 
 ```
-pandas
-numpy
-scikit-learn
-matplotlib
-keras / tensorflow
-flask
-pyspark
-pyarrow
+pip install -r requirements.txt
 ```
 
-Install core dependencies:
+| Package | Used by |
+|---|---|
+| `tensorflow >= 2.13` | CNN model (train.py, app) |
+| `keras` | included with TensorFlow |
+| `scikit-learn` | normalization, train/test split |
+| `pandas`, `numpy` | data handling throughout |
+| `matplotlib` | CLI annotation UI (annotate.py, train.py) |
+| `flask >= 3.0` | web app |
+| `pyarrow >= 13` | Parquet I/O in the regression pipeline |
+| `pyspark >= 3.4` | Hive/Hadoop queries (Component 2 only) |
+
+Optional:
+
 ```bash
-pip install pandas numpy scikit-learn matplotlib keras flask pyarrow
+pip install tensorflow-directml-plugin   # GPU on native Windows
 ```
