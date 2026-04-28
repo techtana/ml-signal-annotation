@@ -75,7 +75,7 @@ Edit the parameters at the top of [annotation/annotate.py](annotation/annotate.p
 python -m annotation.annotate
 ```
 
-Each trace opens a matplotlib window. Click on the x-axis to mark an event. The window closes and moves to the next trace.
+A single matplotlib window opens and is reused for every sample — the plot updates in-place rather than closing and reopening. Click anywhere on the x-axis to mark the event position and advance to the next sample. If `OUTPUT_PATH` already exists on disk the annotation step is skipped entirely and the existing file is used.
 
 **Step 3 — Annotate + train in one pass**
 
@@ -85,7 +85,37 @@ Edit the parameters at the top of [train.py](train.py) and run:
 python train.py
 ```
 
-This annotates, trains a CNN, and saves per-sample predictions.
+This annotates (or loads existing annotations), trains a CNN, and saves per-sample predictions to `OUTPUT_PATH`. The model is saved under `artifacts/`.
+
+### Parameters (`train.py`)
+
+| Parameter | Default | Description |
+|---|---|---|
+| `DATA_PATH` | `data/traces.csv` | Input time-series CSV |
+| `ANNOTATION_PATH` | `data/annotations.csv` | Annotation file to write or load |
+| `OUTPUT_PATH` | `data/predictions.csv` | Per-sample prediction output |
+| `GROUP_BY_COL` | `run_id` | Column used to group samples |
+| `TIME_INDEX_COL` | `elapsed_time` | Time / x-axis column |
+| `CHANNEL_COLS` | `None` | Channel columns; `None` = all non-index columns |
+| `ANNOTATE_COUNT` | `100` | Samples to annotate; `None` = all |
+| `TRIM_RATIO` | `0.1` | Fraction trimmed from each end before display |
+| `TEST_SIZE` | `0.20` | Validation split fraction |
+| `BATCH_SIZE` | `200` | Training batch size |
+| `NUM_EPOCHS` | `100` | Training epochs |
+| `USE_GPU` | `True` | Use GPU if available; falls back to CPU automatically |
+| `GPU_MEMORY_FRACTION` | `None` | VRAM fraction to reserve (e.g. `0.8`); `None` = dynamic growth |
+
+### GPU configuration
+
+`configure_gpu()` is called before any Keras operations and handles three cases:
+
+| `USE_GPU` | GPU present | Behaviour |
+|---|---|---|
+| `False` | — | GPU hidden from TensorFlow; trains on CPU |
+| `True` | No | Prints a warning and falls back to CPU |
+| `True` | Yes | Enables memory growth (`GPU_MEMORY_FRACTION=None`) or reserves a fixed VRAM slice |
+
+`GPU_MEMORY_FRACTION=None` (the default) lets TensorFlow allocate memory on demand — recommended on shared machines. Set it to a value like `0.8` to pre-reserve 80 % of VRAM for more deterministic performance on a dedicated GPU.
 
 ### Annotation classes (`annotation/interactive.py`)
 
@@ -95,7 +125,7 @@ Multi-line 2D plot. Click → integer x index returned.
 **`InteractiveAnnotation_heatmap(data)`**  
 Heatmap view. Click → float x value returned.
 
-Both expose `.annotate()` which blocks until a click, then returns the selected value.
+Both expose `.annotate(fig=None, ax=None)`. When `fig` and `ax` are omitted a standalone window is created and closed after the click. When passed in, the axes are updated in-place and the window stays open — this is how the annotation loop in `annotate.py` and `train.py` keeps a single persistent window.
 
 ### CNN architecture
 
