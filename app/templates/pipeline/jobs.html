@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block title %}Pipeline jobs · Component 2{% endblock %}
+
+{% block content %}
+  <div class="d-flex flex-column flex-md-row justify-content-between align-items-start gap-3 mb-3">
+    <div>
+      <h1 class="h4 mb-1">Pipeline jobs</h1>
+      <div class="text-secondary">Overview from <code>config.json</code>.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <div class="table-responsive">
+        <table class="table table-sm table-striped align-middle">
+          <thead>
+            <tr>
+              <th>#</th>
+              {% for c in colnames %}
+                <th>{{ c }}</th>
+              {% endfor %}
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in records %}
+              <tr>
+                <td>{{ row["_idx"] }}</td>
+                {% for c in colnames %}
+                  <td>{{ row[c] }}</td>
+                {% endfor %}
+                <td class="text-end">
+                  <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('pipeline.job', id=row['_idx']) }}">View</a>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+

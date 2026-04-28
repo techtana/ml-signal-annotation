@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+
+{% block title %}Annotate · Done{% endblock %}
+
+{% block content %}
+  <div class="card">
+    <div class="card-body">
+      <h1 class="h4 mb-2">Annotation complete</h1>
+      <p class="text-secondary mb-3">
+        You reached the end of the dataset for this annotation session.
+      </p>
+      <div class="row g-3">
+        <div class="col-md-4">
+          <div class="p-3 border rounded bg-body-tertiary">
+            <div class="text-secondary small">Annotated</div>
+            <div class="h4 mb-0">{{ annotated_count }}</div>
+          </div>
+        </div>
+        <div class="col-md-4">
+          <div class="p-3 border rounded bg-body-tertiary">
+            <div class="text-secondary small">Total samples</div>
+            <div class="h4 mb-0">{{ total }}</div>
+          </div>
+        </div>
+        <div class="col-md-4">
+          <div class="p-3 border rounded bg-body-tertiary">
+            <div class="text-secondary small">Annotations CSV</div>
+            <div class="fw-semibold"><code>{{ cfg.annotation_path }}</code></div>
+          </div>
+        </div>
+      </div>
+      <hr />
+      <div class="d-flex gap-2">
+        <a class="btn btn-primary" href="{{ url_for('cnn.train') }}">Train model</a>
+        <a class="btn btn-outline-primary" href="{{ url_for('cnn.annotate') }}">Review annotations</a>
+        <form method="post" action="{{ url_for('cnn.annotate_reset') }}">
+          <button class="btn btn-outline-secondary" type="submit">Annotate again (reset)</button>
+        </form>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+

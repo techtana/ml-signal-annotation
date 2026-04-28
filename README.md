@@ -199,7 +199,7 @@ python -m modeling.import_config
 ### Flask dashboard
 
 ```bash
-export FLASK_APP=dashboard/app.py
+export FLASK_APP=app/app.py
 flask run --host=0.0.0.0 --port=8972
 ```
 

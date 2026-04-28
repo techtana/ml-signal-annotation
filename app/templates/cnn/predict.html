@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block title %}Predict · CNN{% endblock %}
+
+{% block content %}
+  <div class="d-flex flex-column flex-md-row justify-content-between align-items-start gap-3 mb-3">
+    <div>
+      <h1 class="h4 mb-1">Predict</h1>
+      <div class="text-secondary">
+        Loads a saved model and writes predictions to <code>{{ cfg.output_path }}</code>.
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3">
+    <div class="col-lg-5">
+      <div class="card">
+        <div class="card-body">
+          <form method="post">
+            <label class="form-label">Model path</label>
+            <input class="form-control" name="model_path" value="{{ latest_model or '' }}" />
+            <div class="form-text">
+              Default = latest model under <code>{{ cfg.artifacts_dir }}</code>.
+            </div>
+            <button class="btn btn-primary mt-3" type="submit" {% if not latest_model %}disabled{% endif %}>Run prediction</button>
+          </form>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-7">
+      <div class="card">
+        <div class="card-body">
+          <h2 class="h6">Latest run</h2>
+          {% if summary %}
+            <pre class="mb-0"><code>{{ summary|tojson(indent=2) }}</code></pre>
+          {% else %}
+            <div class="text-secondary">No run yet.</div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+

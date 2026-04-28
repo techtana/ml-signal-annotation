@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+
+{% block title %}Annotate · CNN{% endblock %}
+
+{% block head %}
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+{% endblock %}
+
+{% block content %}
+  {% set review = review|default(false) %}
+  <div class="d-flex flex-column flex-md-row justify-content-between align-items-start gap-3 mb-3">
+    <div>
+      <h1 class="h4 mb-1">Annotate</h1>
+      <div class="text-secondary">
+        Click on the plot to label the event position (x-axis). Label is saved to <code>{{ cfg.annotation_path }}</code>.
+      </div>
+    </div>
+    <div class="d-flex gap-2">
+      {% if ready and review %}
+        <div class="btn-group" role="group" aria-label="Review navigation">
+          <a class="btn btn-outline-secondary {% if not has_prev %}disabled{% endif %}"
+             href="{% if has_prev %}{{ url_for('cnn.annotate', key=prev_key) }}{% else %}#{% endif %}">
+            Prev
+          </a>
+          <a class="btn btn-outline-secondary {% if not has_next %}disabled{% endif %}"
+             href="{% if has_next %}{{ url_for('cnn.annotate', key=next_key) }}{% else %}#{% endif %}">
+            Next
+          </a>
+        </div>
+      {% endif %}
+      <form method="post" action="{{ url_for('cnn.annotate_reset') }}">
+        <button class="btn btn-outline-secondary" type="submit">Reset session</button>
+      </form>
+      <form method="post" action="{{ url_for('cnn.annotate_skip') }}">
+        <button class="btn btn-outline-secondary" type="submit" {% if not ready %}disabled{% endif %}>Skip</button>
+      </form>
+    </div>
+  </div>
+
+  {% if not ready %}
+    <div class="alert alert-warning">
+      This page needs an input CSV at <code>{{ cfg.data_path }}</code>. Update the path in
+      <a href="{{ url_for('cnn.settings') }}">settings</a> or add the file.
+    </div>
+  {% else %}
+    {% if review %}
+      <div class="alert alert-info">
+        <strong>Review mode.</strong> You reached the end of the dataset, but you can still browse samples and
+        adjust labels on the plot. Use <strong>Prev/Next</strong> or open a specific sample with
+        <code>?key=&lt;run_id&gt;</code>.
+      </div>
+    {% endif %}
+    <div class="row g-3 mb-3">
+      <div class="col-lg-4">
+        <div class="card">
+          <div class="card-body">
+            <div class="text-secondary small">Sample</div>
+            <div class="fw-semibold">{{ key }}</div>
+            <div class="text-secondary small mt-2">Progress</div>
+            <div>{{ idx + 1 }} / {{ total }}</div>
+            <div class="text-secondary small mt-2">Annotated so far</div>
+            <div>{{ annotated_count }}</div>
+            <hr />
+            <div class="text-secondary small">How to label</div>
+            <ul class="mb-0">
+              <li>Click anywhere on the chart to set the label.</li>
+              <li>Press <span class="kbd">S</span> to skip.</li>
+            </ul>
+            {% if existing_label is not none %}
+              <div class="mt-3">
+                <div class="text-secondary small">Existing label</div>
+                <div class="fw-semibold">{{ existing_label }}</div>
+              </div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-8">
+        <div class="card">
+          <div class="card-body">
+            <div id="plot" style="height: 520px"></div>
+            <div class="text-secondary small mt-2">
+              Tip: you can zoom/drag in the plot before clicking.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+{% endblock %}
+
+{% block scripts %}
+  {% if ready %}
+    <script>
+      const key = {{ key|tojson }};
+      const x = {{ x|tojson }};
+      const series = {{ series|tojson }};
+      const existingLabel = {{ existing_label|tojson }};
+
+      const traces = series.map(s => ({
+        x,
+        y: s.y,
+        name: s.name,
+        type: "scatter",
+        mode: "lines",
+        line: { width: 1.5 }
+      }));
+
+      const shapes = [];
+      if (existingLabel !== null) {
+        shapes.push({
+          type: "line",
+          x0: existingLabel,
+          x1: existingLabel,
+          y0: 0,
+          y1: 1,
+          xref: "x",
+          yref: "paper",
+          line: { color: "#dc3545", width: 2, dash: "dot" }
+        });
+      }
+
+      Plotly.newPlot("plot", traces, {
+        margin: { t: 10, r: 10, b: 40, l: 45 },
+        showlegend: true,
+        legend: { orientation: "h" },
+        xaxis: { title: "Time" },
+        yaxis: { title: "Normalized value" },
+        shapes
+      }, { responsive: true });
+
+      function postLabel(xVal) {
+        return fetch({{ url_for('cnn.annotate_label')|tojson }}, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key, label: xVal })
+        }).then(r => r.json());
+      }
+
+      const plot = document.getElementById("plot");
+      plot.on("plotly_click", (evt) => {
+        const xVal = evt.points?.[0]?.x;
+        if (xVal === undefined || xVal === null) return;
+        postLabel(xVal).then((resp) => {
+          if (resp.ok) window.location.reload();
+          else alert(resp.error || "Failed to save label");
+        });
+      });
+
+      window.addEventListener("keydown", (e) => {
+        if (e.key?.toLowerCase() === "s") {
+          fetch({{ url_for('cnn.annotate_skip')|tojson }}, { method: "POST" }).then(() => window.location.reload());
+        }
+      });
+    </script>
+  {% endif %}
+{% endblock %}
+

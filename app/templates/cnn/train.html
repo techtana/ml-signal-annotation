@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block title %}Train · CNN{% endblock %}
+
+{% block content %}
+  <div class="d-flex flex-column flex-md-row justify-content-between align-items-start gap-3 mb-3">
+    <div>
+      <h1 class="h4 mb-1">Train</h1>
+      <div class="text-secondary">
+        Trains the CNN regressor and writes predictions to <code>{{ cfg.output_path }}</code>.
+      </div>
+    </div>
+    <div class="d-flex gap-2">
+      <a class="btn btn-outline-secondary" href="{{ url_for('cnn.settings') }}">Settings</a>
+    </div>
+  </div>
+
+  <div class="row g-3">
+    <div class="col-lg-5">
+      <div class="card">
+        <div class="card-body">
+          <div class="text-secondary small">Annotations</div>
+          <div class="h5 mb-3">{{ annotated_count }}</div>
+          <div class="text-secondary small">Epochs / Batch</div>
+          <div class="mb-3">{{ cfg.num_epochs }} / {{ cfg.batch_size }}</div>
+          <form method="post">
+            <button class="btn btn-primary" type="submit">Run training</button>
+          </form>
+          <div class="form-text mt-2">
+            Note: training runs in-process; for large datasets it can take a while.
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-7">
+      <div class="card">
+        <div class="card-body">
+          <h2 class="h6">Latest run</h2>
+          {% if summary %}
+            <pre class="mb-0"><code>{{ summary|tojson(indent=2) }}</code></pre>
+          {% else %}
+            <div class="text-secondary">No run yet.</div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+
