@@ -24,7 +24,7 @@
         <div class="card-body">
           <form method="post">
             <label class="form-label">Prediction data CSV</label>
-            <select class="form-select" name="data_path">
+            <select class="form-select" name="data_path" id="data-path-select">
               <option value="">Use default: {{ cfg.data_path }}</option>
               {% for path in csv_options %}
                 <option value="{{ path }}" {% if selected_data_path == path %}selected{% endif %}>{{ path }}</option>
@@ -35,15 +35,18 @@
             </div>
 
             <label class="form-label mt-3">Manual CSV path</label>
-            <input class="form-control" name="data_path_manual"
+            <input class="form-control" name="data_path_manual" id="data-path-manual"
               value="{% if selected_data_path not in csv_options and selected_data_path != cfg.data_path %}{{ selected_data_path }}{% endif %}"
               placeholder="e.g. data/traces.csv" />
 
+            <div id="compat-badge" class="mt-2"></div>
+
             <label class="form-label mt-3">Model path</label>
-            <input class="form-control" name="model_path" value="{{ latest_model or '' }}" />
+            <input class="form-control" name="model_path" id="model-path-input" value="{{ latest_model or '' }}" />
             <div class="form-text">
               Default = latest model under <code>{{ cfg.artifacts_dir }}</code>.
             </div>
+            <div id="model-info-badge" class="mt-1 text-secondary small"></div>
             <button class="btn btn-primary mt-3" type="submit" {% if not latest_model %}disabled{% endif %}>
               Run prediction
             </button>
@@ -126,13 +129,15 @@
 
       <!-- Plot view (hidden by default) -->
       <div id="view-plot" class="d-none">
-        <div class="d-flex align-items-center gap-3 mb-3">
-          <label class="form-label mb-0 fw-semibold text-nowrap" for="sample-select">Sample</label>
-          <select class="form-select" style="max-width: 320px" id="sample-select">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <button class="btn btn-outline-secondary btn-sm" id="btn-prev" onclick="stepSample(-1)" disabled>&#8592; Prev</button>
+          <button class="btn btn-outline-secondary btn-sm" id="btn-next" onclick="stepSample(1)">Next &#8594;</button>
+          <select class="form-select form-select-sm" style="max-width: 320px" id="sample-select">
             {% for row in predictions %}
               <option value="{{ row[cfg.group_by_col] }}">{{ row[cfg.group_by_col] }}</option>
             {% endfor %}
           </select>
+          <span class="text-secondary text-nowrap small" id="sample-counter"></span>
         </div>
         <div id="trace-plot" style="height: 420px"></div>
       </div>
@@ -143,12 +148,97 @@
 {% endblock %}
 
 {% block scripts %}
+<script>
+(function () {
+  const MODEL_INFO_URL = {{ url_for('cnn.predict_model_info') | tojson }};
+  const DATA_INFO_URL  = {{ url_for('cnn.predict_data_info')  | tojson }};
+  const DEFAULT_DATA_PATH = {{ cfg.data_path | tojson }};
+
+  let modelMeta = null;
+
+  function getDataPath() {
+    const manual = (document.getElementById('data-path-manual').value || '').trim();
+    const select = (document.getElementById('data-path-select').value || '').trim();
+    return manual || select || DEFAULT_DATA_PATH;
+  }
+
+  function setModelBadge(html) {
+    document.getElementById('model-info-badge').innerHTML = html;
+  }
+
+  function setCompatBadge(html) {
+    document.getElementById('compat-badge').innerHTML = html;
+  }
+
+  function checkCompat() {
+    if (!modelMeta || !modelMeta.num_channels) { setCompatBadge(''); return; }
+    const dataPath = getDataPath();
+    fetch(`${DATA_INFO_URL}?data_path=${encodeURIComponent(dataPath)}`)
+      .then(r => r.json())
+      .then(info => {
+        if (info.error) {
+          setCompatBadge(`<span class="badge bg-warning text-dark">⚠ ${info.error}</span>`);
+          return;
+        }
+        const chOk = info.num_channels === modelMeta.num_channels;
+        const colsOk = !modelMeta.channel_cols || modelMeta.channel_cols.length === 0 ||
+          JSON.stringify([...info.channel_cols].sort()) === JSON.stringify([...modelMeta.channel_cols].sort());
+        if (chOk && colsOk) {
+          setCompatBadge('<span class="badge bg-success">✓ Compatible with model</span>');
+        } else if (!chOk) {
+          setCompatBadge(`<span class="badge bg-warning text-dark">⚠ Channel mismatch: data has ${info.num_channels} ch, model expects ${modelMeta.num_channels}</span>`);
+        } else {
+          const got = info.channel_cols.join(', ');
+          const exp = modelMeta.channel_cols.join(', ');
+          setCompatBadge(`<span class="badge bg-warning text-dark">⚠ Column mismatch — data: [${got}] · model: [${exp}]</span>`);
+        }
+      })
+      .catch(() => setCompatBadge(''));
+  }
+
+  function loadModelInfo() {
+    const mp = (document.getElementById('model-path-input').value || '').trim();
+    if (!mp) { setModelBadge(''); modelMeta = null; setCompatBadge(''); return; }
+    fetch(`${MODEL_INFO_URL}?model_path=${encodeURIComponent(mp)}`)
+      .then(r => r.json())
+      .then(meta => {
+        if (meta.error) { setModelBadge(`<span class="text-warning">${meta.error}</span>`); modelMeta = null; setCompatBadge(''); return; }
+        modelMeta = meta;
+        const parts = [];
+        if (meta.num_channels) parts.push(`${meta.num_channels} ch`);
+        if (meta.max_len)      parts.push(`${meta.max_len} steps`);
+        if (meta.trim_ratio != null) parts.push(`trim ${meta.trim_ratio}`);
+        setModelBadge(parts.length ? `Model expects: ${parts.join(' · ')}` : '');
+        checkCompat();
+      })
+      .catch(() => { setModelBadge(''); modelMeta = null; });
+  }
+
+  document.getElementById('model-path-input').addEventListener('change', loadModelInfo);
+  document.getElementById('data-path-select').addEventListener('change', checkCompat);
+  document.getElementById('data-path-manual').addEventListener('change', checkCompat);
+
+  // Run on page load
+  loadModelInfo();
+})();
+</script>
+
 {% if predictions %}
 <script>
   const DATA_PATH = {{ selected_data_path | tojson }};
   const SAMPLE_DATA_URL = {{ url_for('cnn.predict_sample_data') | tojson }};
 
+  const keys = {{ predictions | map(attribute=cfg.group_by_col) | list | tojson }};
+  let currentIdx = 0;
   let plotInitialized = false;
+
+  function syncControls() {
+    const sel = document.getElementById('sample-select');
+    sel.value = keys[currentIdx];
+    document.getElementById('btn-prev').disabled = currentIdx === 0;
+    document.getElementById('btn-next').disabled = currentIdx === keys.length - 1;
+    document.getElementById('sample-counter').textContent = `${currentIdx + 1} / ${keys.length}`;
+  }
 
   function showView(view) {
     const isTable = view === 'table';
@@ -157,8 +247,17 @@
     document.getElementById('btn-table').className = 'btn btn-sm ' + (isTable ? 'btn-primary' : 'btn-outline-secondary');
     document.getElementById('btn-plot').className  = 'btn btn-sm ' + (!isTable ? 'btn-primary' : 'btn-outline-secondary');
     if (!isTable && !plotInitialized) {
-      loadTrace(document.getElementById('sample-select').value);
+      syncControls();
+      loadTrace(keys[currentIdx]);
     }
+  }
+
+  function stepSample(delta) {
+    const next = currentIdx + delta;
+    if (next < 0 || next >= keys.length) return;
+    currentIdx = next;
+    syncControls();
+    loadTrace(keys[currentIdx]);
   }
 
   function loadTrace(key) {
@@ -212,7 +311,11 @@
       });
   }
 
-  document.getElementById('sample-select').addEventListener('change', e => loadTrace(e.target.value));
+  document.getElementById('sample-select').addEventListener('change', e => {
+    currentIdx = keys.indexOf(e.target.value);
+    syncControls();
+    loadTrace(keys[currentIdx]);
+  });
 </script>
 {% endif %}
 {% endblock %}

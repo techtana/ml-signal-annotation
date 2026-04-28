@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -238,6 +239,18 @@ def train_and_predict(cfg: CnnConfig) -> dict:
     model_path = artifacts_dir / f"cnn_regressor_{timestamp}.keras"
     model.save(model_path.as_posix())
 
+    # Save sidecar metadata so predict_only can validate input compatibility.
+    meta = {
+        "max_len": max_len,
+        "num_channels": len(channel_cols),
+        "channel_cols": channel_cols,
+        "group_by_col": cfg.group_by_col,
+        "time_index_col": cfg.time_index_col,
+        "trim_ratio": cfg.trim_ratio,
+        "input_shape": list(input_shape),
+    }
+    model_path.with_suffix(".json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
     predictions = model.predict(X_all, verbose=0).flatten() * max_len * time_scale
     out_df = pd.DataFrame(
         [[key, float(pred)] for key, pred in zip(keys, predictions)],
@@ -257,6 +270,17 @@ def train_and_predict(cfg: CnnConfig) -> dict:
     }
 
 
+def load_model_meta(model_path: str) -> dict:
+    """Read the JSON sidecar saved alongside a model file. Returns {} if absent."""
+    p = Path(model_path).with_suffix(".json")
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
 def find_latest_model(artifacts_dir: str = "artifacts") -> str | None:
     p = Path(artifacts_dir)
     if not p.exists():
@@ -266,27 +290,73 @@ def find_latest_model(artifacts_dir: str = "artifacts") -> str | None:
 
 
 def predict_only(*, cfg: CnnConfig, model_path: str) -> dict:
-    """Load an existing model and write predictions CSV."""
+    """Load an existing model, validate input compatibility, and write predictions CSV."""
     from keras.models import load_model
 
-    groups, channel_cols, max_len = load_and_group(
+    # Load model first so we can validate before processing the entire dataset.
+    model = load_model(model_path)
+    expected_shape = model.input_shape          # (None, time_steps, channels, 1)
+    expected_max_len: int = expected_shape[1]
+    expected_channels: int = expected_shape[2]
+
+    # Read sidecar for column-name hints (no TF required to produce it).
+    meta = load_model_meta(model_path)
+    trained_channel_cols: list[str] = meta.get("channel_cols", [])
+
+    groups, channel_cols, _ = load_and_group(
         cfg.data_path, cfg.group_by_col, cfg.time_index_col, cfg.channel_cols
     )
     keys = list(groups.keys())
 
-    # Preprocess all traces (same as training)
+    if not keys:
+        raise ValueError("No samples found in the data file.")
+
+    # --- channel count ---
+    if len(channel_cols) != expected_channels:
+        hint = (
+            f" Model was trained on: {trained_channel_cols}." if trained_channel_cols else ""
+        )
+        raise ValueError(
+            f"Channel mismatch: model expects {expected_channels} channel(s) but "
+            f"this data has {len(channel_cols)} ({', '.join(channel_cols)}).{hint}"
+        )
+
+    # --- column names (if metadata available) ---
+    if trained_channel_cols and sorted(channel_cols) != sorted(trained_channel_cols):
+        raise ValueError(
+            f"Column name mismatch: model was trained on {trained_channel_cols} "
+            f"but data has {channel_cols}. Rename columns or use the original training CSV."
+        )
+
+    # Preprocess using the model's expected max_len, not the new data's natural length.
+    # This ensures X_all matches the model's input shape exactly.
     processed: dict[str, pd.DataFrame] = {}
     for key in keys:
         trace = groups[key]
         trim = int(len(trace) * cfg.trim_ratio)
-        processed[key] = equalize_length(normalize(trace.iloc[trim : len(trace) - trim]), max_len)
+        trimmed = trace.iloc[trim: len(trace) - trim]
+        if len(trimmed) == 0:
+            raise ValueError(
+                f"Sample '{key}' has no rows after trimming "
+                f"(trim_ratio={cfg.trim_ratio}, trace length={len(trace)})."
+            )
+        processed[key] = equalize_length(normalize(trimmed), expected_max_len)
 
     X_all = np.expand_dims(np.array([processed[k].values for k in keys]), axis=3)
-    sample_trace = processed[keys[0]]
-    time_scale = (sample_trace.index.max() - sample_trace.index.min()) / max_len
 
-    model = load_model(model_path)
-    predictions = model.predict(X_all, verbose=0).flatten() * max_len * time_scale
+    # Final shape guard — catches any remaining mismatch before handing to TF.
+    actual = X_all.shape[1:]
+    expected = (expected_max_len, expected_channels, 1)
+    if actual != expected:
+        raise ValueError(
+            f"Input shape mismatch after preprocessing: got {actual}, "
+            f"model expects {expected}."
+        )
+
+    sample_trace = processed[keys[0]]
+    time_scale = (sample_trace.index.max() - sample_trace.index.min()) / expected_max_len
+
+    predictions = model.predict(X_all, verbose=0).flatten() * expected_max_len * time_scale
     out_df = pd.DataFrame(
         [[key, float(pred)] for key, pred in zip(keys, predictions)],
         columns=[cfg.group_by_col, "predicted_position"],
@@ -294,5 +364,11 @@ def predict_only(*, cfg: CnnConfig, model_path: str) -> dict:
     Path(cfg.output_path).parent.mkdir(parents=True, exist_ok=True)
     out_df.to_csv(cfg.output_path, index=False)
 
-    return {"model_path": model_path, "num_samples": len(keys), "output_path": cfg.output_path}
+    return {
+        "model_path": model_path,
+        "num_samples": len(keys),
+        "output_path": cfg.output_path,
+        "expected_channels": expected_channels,
+        "expected_max_len": expected_max_len,
+    }
 

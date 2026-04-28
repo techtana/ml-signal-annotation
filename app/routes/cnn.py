@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 from dataclasses import replace
 from pathlib import Path
@@ -14,6 +15,7 @@ from ..services.cnn_pipeline import (
     annotation_path_for,
     find_latest_model,
     load_and_group,
+    load_model_meta,
     normalize_sample_key,
     predict_only,
     train_and_predict,
@@ -359,6 +361,28 @@ def predict():
         selected_data_path=selected_data_path,
         predictions=predictions,
     )
+
+
+@bp.get("/predict/model-info")
+def predict_model_info():
+    model_path = request.args.get("model_path", "").strip()
+    if not model_path or not Path(model_path).exists():
+        return jsonify({"error": "Model not found"}), 404
+    meta = load_model_meta(model_path)
+    if not meta:
+        return jsonify({"error": "No metadata available for this model"}), 404
+    return jsonify(meta)
+
+
+@bp.get("/predict/data-info")
+def predict_data_info():
+    cfg = load_config()
+    data_path = request.args.get("data_path", cfg.data_path).strip()
+    if not Path(data_path).exists():
+        return jsonify({"error": f"File not found: {data_path}"}), 404
+    df = pd.read_csv(data_path, nrows=5)
+    channel_cols = [c for c in df.columns if c not in (cfg.group_by_col, cfg.time_index_col, "label")]
+    return jsonify({"num_channels": len(channel_cols), "channel_cols": channel_cols})
 
 
 @bp.get("/predict/sample-data")
