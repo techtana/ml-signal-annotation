@@ -154,21 +154,12 @@
 
   function setDataPath(path) {
     const sel = document.getElementById('data-path-select');
-    const manual = document.getElementById('data-path-manual');
     const opt = Array.from(sel.options).find(o => o.value === path);
-    if (opt) {
-      sel.value = path;
-      manual.value = '';
-    } else {
-      sel.value = '';
-      manual.value = path;
-    }
+    if (opt) sel.value = path;
   }
 
   function getDataPath() {
-    const manual = (document.getElementById('data-path-manual').value || '').trim();
-    const select = (document.getElementById('data-path-select').value || '').trim();
-    return manual || select || DEFAULT_DATA_PATH;
+    return (document.getElementById('data-path-select').value || '').trim() || DEFAULT_DATA_PATH;
   }
 
   function setModelBadge(html) {
@@ -229,7 +220,6 @@
 
   document.getElementById('model-path-input').addEventListener('change', loadModelInfo);
   document.getElementById('data-path-select').addEventListener('change', checkCompat);
-  document.getElementById('data-path-manual').addEventListener('change', checkCompat);
 
   // Run on page load
   loadModelInfo();

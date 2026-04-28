@@ -329,11 +329,7 @@ def predict():
     summary = None
 
     if request.method == "POST":
-        selected_data_path = (
-            request.form.get("data_path", "").strip()
-            or request.form.get("data_path_manual", "").strip()
-            or cfg.data_path
-        )
+        selected_data_path = request.form.get("data_path", "").strip() or cfg.data_path
         model_path = request.form.get("model_path", "").strip() or latest
         if not model_path:
             flash("No model found. Train first or provide a model path.", "danger")
