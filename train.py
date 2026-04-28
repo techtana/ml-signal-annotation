@@ -178,7 +178,7 @@ def main():
     )
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_path = f"cnn_regressor_{timestamp}"
+    model_path = f"artifacts/cnn_regressor_{timestamp}.keras"
     model.save(model_path)
     if VERBOSE:
         plot_training_history(history)
