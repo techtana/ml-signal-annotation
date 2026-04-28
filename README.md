@@ -169,8 +169,8 @@ Input → Conv2D(32, kernel=(5,1)) → MaxPool(2,1)
 |---|---|
 | `/cnn/source` | Select or upload a trace CSV |
 | `/cnn/annotate` | Interactive Plotly chart; click to label; Prev/Next/Skip navigation |
-| `/cnn/train` | Run CNN training in-process; shows annotated count + training summary |
-| `/cnn/predict` | Run inference with a saved model; toggle between result table and trace plot |
+| `/cnn/train` | Run CNN training in-process; shows annotated count + training summary; button disabled while running to prevent double-submit |
+| `/cnn/predict` | Run inference with a saved model; data path defaults to the CSV used during training; live compatibility badge checks channel count and column names before running; toggle between result table and per-sample trace plot |
 | `/cnn/settings` | Edit all pipeline parameters (paths, hyperparameters, GPU options) |
 | `/cnn/download-sample` | Download a ZIP of sample trace + annotation CSVs |
 
