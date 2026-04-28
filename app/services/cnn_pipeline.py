@@ -34,6 +34,20 @@ class CnnConfig:
     artifacts_dir: str = "artifacts"
 
 
+def normalize_sample_key(value) -> str:
+    """Normalize sample IDs so values like 1, 1.0, and '1' match consistently."""
+    if pd.isna(value):
+        return ""
+    text = str(value).strip()
+    try:
+        number = float(text)
+        if number.is_integer():
+            return str(int(number))
+        return text
+    except ValueError:
+        return text
+
+
 def load_and_group(path: str, group_col: str, time_col: str, channel_cols: list[str] | None):
     df = pd.read_csv(path)
     if time_col in df.columns:
@@ -45,7 +59,7 @@ def load_and_group(path: str, group_col: str, time_col: str, channel_cols: list[
     groups: dict[str, pd.DataFrame] = {}
     for key, grp in df.groupby(group_col):
         trace = grp[channel_cols + [time_col]].set_index(time_col).iloc[1:]
-        groups[str(key)] = trace
+        groups[normalize_sample_key(key)] = trace
         max_len = max(max_len, len(trace))
 
     return groups, channel_cols, max_len
@@ -70,7 +84,7 @@ def build_datasets(
 
     labels: dict[str, float] = {}
     for _, row in df_annotations.iterrows():
-        key = str(row[group_by_col])
+        key = normalize_sample_key(row[group_by_col])
         raw_label = float(row["label"])
         if key not in processed:
             continue
@@ -171,6 +185,8 @@ def train_and_predict(cfg: CnnConfig) -> dict:
     keys = list(groups.keys())
 
     df_ann = pd.read_csv(cfg.annotation_path)
+    if cfg.group_by_col in df_ann.columns:
+        df_ann[cfg.group_by_col] = df_ann[cfg.group_by_col].map(normalize_sample_key)
 
     X_train, y_train, X_test, y_test, X_all, processed = build_datasets(
         groups=groups,
@@ -216,7 +232,7 @@ def train_and_predict(cfg: CnnConfig) -> dict:
         "device": device,
         "model_path": model_path.as_posix(),
         "num_samples": len(keys),
-        "num_annotated": int(df_ann[cfg.group_by_col].astype(str).isin(keys).sum()),
+        "num_annotated": int(df_ann[cfg.group_by_col].isin(keys).sum()),
         "final_loss": float(history.history["loss"][-1]) if history.history.get("loss") else None,
         "final_val_loss": float(history.history["val_loss"][-1]) if history.history.get("val_loss") else None,
         "output_path": cfg.output_path,
