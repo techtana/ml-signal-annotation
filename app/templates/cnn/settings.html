@@ -16,17 +16,13 @@
         <div class="col-md-6">
           <label class="form-label">Data CSV</label>
           <input class="form-control" name="data_path" value="{{ cfg.data_path }}" />
-          <div class="form-text">Default: <code>data/traces.csv</code></div>
+          <div class="form-text">Default bundled sample. Upload/select a trace file on the source page to override it for the current session.</div>
         </div>
         <div class="col-md-6">
           <label class="form-label">Artifacts directory</label>
           <input class="form-control" name="artifacts_dir" value="{{ cfg.artifacts_dir }}" />
         </div>
 
-        <div class="col-md-6">
-          <label class="form-label">Annotations CSV</label>
-          <input class="form-control" name="annotation_path" value="{{ cfg.annotation_path }}" />
-        </div>
         <div class="col-md-6">
           <label class="form-label">Predictions CSV</label>
           <input class="form-control" name="output_path" value="{{ cfg.output_path }}" />

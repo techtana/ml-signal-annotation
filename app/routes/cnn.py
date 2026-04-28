@@ -29,7 +29,7 @@ def _sample_sort_key(value: str):
 
 @bp.get("/")
 def home():
-    return redirect(url_for("cnn.annotate"))
+    return redirect(url_for("cnn.source"))
 
 
 @bp.route("/settings", methods=["GET", "POST"])
@@ -123,9 +123,7 @@ def source():
             delete_temp_trace(previous)
 
         session["active_trace_path"] = new_path
-        state = load_state()
-        if state is not None:
-            reset_state(keys=state.keys, trim_ratio=cfg.trim_ratio)
+        save_state(reset_state(keys=[], trim_ratio=cfg.trim_ratio))
         return redirect(url_for("cnn.annotate"))
 
     return render_template(
@@ -139,6 +137,9 @@ def source():
 @bp.get("/annotate")
 def annotate():
     cfg = load_config()
+    if "active_trace_path" not in session:
+        flash("Choose a trace CSV before annotating.", "info")
+        return redirect(url_for("cnn.source"))
     active_trace_path = _active_trace_path(cfg)
     if not active_trace_path or not Path(active_trace_path).exists():
         flash("Select or upload a trace CSV before annotating.", "warning")

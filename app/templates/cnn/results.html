@@ -7,8 +7,11 @@
     <div>
       <h1 class="h4 mb-1">Results</h1>
       <div class="text-secondary">
-        Annotations from <code>{{ cfg.annotation_path }}</code> and predictions from <code>{{ cfg.output_path }}</code>.
+        Labels from the active trace CSV and predictions from <code>{{ cfg.output_path }}</code>.
       </div>
+      {% if active_trace_path %}
+        <div class="text-secondary small mt-1">Active file: <code>{{ active_trace_path }}</code></div>
+      {% endif %}
     </div>
   </div>
 

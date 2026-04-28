@@ -14,7 +14,7 @@
             </p>
           </div>
           <div class="d-flex gap-2 align-items-start">
-            <a class="btn btn-primary" href="{{ url_for('cnn.annotate') }}">Start annotating</a>
+            <a class="btn btn-primary" href="{{ url_for('cnn.source') }}">Start annotating</a>
             <a class="btn btn-outline-secondary" href="{{ url_for('cnn.settings') }}">Configure</a>
           </div>
         </div>
@@ -29,7 +29,7 @@
             Interactive time-series annotation + CNN training and per-sample predictions.
           </p>
           <div class="d-flex gap-2">
-            <a class="btn btn-sm btn-outline-primary" href="{{ url_for('cnn.annotate') }}">Annotate</a>
+            <a class="btn btn-sm btn-outline-primary" href="{{ url_for('cnn.source') }}">Annotate</a>
             <a class="btn btn-sm btn-outline-primary" href="{{ url_for('cnn.train') }}">Train</a>
             <a class="btn btn-sm btn-outline-primary" href="{{ url_for('cnn.predict') }}">Predict</a>
             <a class="btn btn-sm btn-outline-primary" href="{{ url_for('cnn.results') }}">Results</a>

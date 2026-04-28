@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+
+{% block title %}Trace Source · CNN{% endblock %}
+
+{% block content %}
+  <div class="d-flex flex-column flex-md-row justify-content-between align-items-start gap-3 mb-3">
+    <div>
+      <h1 class="h4 mb-1">Choose trace file</h1>
+      <div class="text-secondary">
+        Start by selecting a sample CSV or uploading your own trace file for this browser session.
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3">
+    <div class="col-lg-6">
+      <div class="card">
+        <div class="card-body">
+          <form method="post" enctype="multipart/form-data">
+            <label class="form-label">Sample trace CSV</label>
+            <select class="form-select" name="sample_path">
+              <option value="">Choose a bundled sample file</option>
+              {% for path in sample_files %}
+                <option value="{{ path }}" {% if active_trace_path == path %}selected{% endif %}>{{ path }}</option>
+              {% endfor %}
+            </select>
+
+            <div class="text-center text-secondary my-3">or</div>
+
+            <label class="form-label">Upload trace CSV</label>
+            <input class="form-control" type="file" name="trace_file" accept=".csv,text/csv" />
+            <div class="form-text">
+              Uploaded files are used temporarily for your current session and are not kept as app-owned files.
+            </div>
+
+            <button class="btn btn-primary mt-3" type="submit">Continue to annotate</button>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-lg-6">
+      <div class="card mb-3">
+        <div class="card-body">
+          <h2 class="h6">Required format</h2>
+          <p class="text-secondary mb-2">
+            Use one CSV that contains both the trace data and, after annotation, a <code>label</code> column.
+          </p>
+          <ul class="mb-2">
+            <li>One row per time step</li>
+            <li>A sample/group column like <code>{{ cfg.group_by_col }}</code></li>
+            <li>A time column like <code>{{ cfg.time_index_col }}</code></li>
+            <li>One or more numeric signal columns</li>
+            <li>An optional <code>label</code> column; the app will add/update it during annotation</li>
+          </ul>
+          <pre class="mb-0"><code>{{ cfg.group_by_col }},{{ cfg.time_index_col }},channel_1,channel_2,label
+1,0.0,0.44,0.49,
+1,0.5,0.46,0.51,
+2,0.0,0.38,0.41,</code></pre>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-body">
+          <h2 class="h6">Downloads</h2>
+          <div class="d-flex gap-2 flex-wrap">
+            <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('static', filename='prediction_template.csv') }}" download>
+              Download template
+            </a>
+            <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('static', filename='sample_trace_with_labels.csv') }}" download>
+              Download sample file
+            </a>
+          </div>
+          {% if active_trace_path %}
+            <div class="mt-3 text-secondary small">
+              Active file: <code>{{ active_trace_path }}</code>
+            </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+
