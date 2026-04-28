@@ -4,31 +4,41 @@ from pathlib import Path
 
 import pandas as pd
 
+from .cnn_pipeline import normalize_sample_key
+from .trace_files import read_trace_csv, write_trace_csv
+
 
 def load_annotations(path: str, group_by_col: str) -> pd.DataFrame:
     p = Path(path)
     if not p.exists():
         return pd.DataFrame(columns=[group_by_col, "label"])
-    df = pd.read_csv(p)
+    df = read_trace_csv(path)
     if group_by_col not in df.columns or "label" not in df.columns:
         return pd.DataFrame(columns=[group_by_col, "label"])
-    df[group_by_col] = df[group_by_col].astype(str)
-    # Web annotations can land on non-integer x positions, so keep labels float-safe.
+    df[group_by_col] = df[group_by_col].map(normalize_sample_key)
     df["label"] = pd.to_numeric(df["label"], errors="coerce").astype(float)
-    return df[[group_by_col, "label"]].copy()
+    df = df[df["label"].notna()][[group_by_col, "label"]].drop_duplicates(subset=[group_by_col], keep="last")
+    return df.copy()
 
 
 def upsert_annotation(*, path: str, group_by_col: str, key: str, label: float) -> pd.DataFrame:
-    df = load_annotations(path, group_by_col)
-    key = str(key)
+    df = read_trace_csv(path)
+    if group_by_col not in df.columns:
+        raise ValueError(f"Missing group-by column: {group_by_col}")
+
+    key = normalize_sample_key(key)
     label = float(label)
-
-    if (df[group_by_col] == key).any():
-        df.loc[df[group_by_col] == key, "label"] = label
+    normalized_keys = df[group_by_col].map(normalize_sample_key)
+    if "label" not in df.columns:
+        df["label"] = pd.Series([pd.NA] * len(df), dtype="Float64")
     else:
-        df = pd.concat([df, pd.DataFrame([{group_by_col: key, "label": label}])], ignore_index=True)
+        df["label"] = pd.to_numeric(df["label"], errors="coerce").astype("Float64")
 
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=False)
-    return df
+    mask = normalized_keys == key
+    if not mask.any():
+        raise ValueError(f"Sample '{key}' not found in trace file.")
+    df.loc[mask, "label"] = label
+
+    write_trace_csv(df, path)
+    return load_annotations(path, group_by_col)
 

@@ -53,7 +53,7 @@ def load_and_group(path: str, group_col: str, time_col: str, channel_cols: list[
     if time_col in df.columns:
         df = df.sort_values(time_col)
     if channel_cols is None:
-        channel_cols = [c for c in df.columns if c not in (group_col, time_col)]
+        channel_cols = [c for c in df.columns if c not in (group_col, time_col, "label")]
 
     max_len = 0
     groups: dict[str, pd.DataFrame] = {}
@@ -184,9 +184,16 @@ def train_and_predict(cfg: CnnConfig) -> dict:
     )
     keys = list(groups.keys())
 
-    df_ann = pd.read_csv(cfg.annotation_path)
+    df_ann = pd.read_csv(cfg.data_path)
     if cfg.group_by_col in df_ann.columns:
         df_ann[cfg.group_by_col] = df_ann[cfg.group_by_col].map(normalize_sample_key)
+    if "label" in df_ann.columns:
+        df_ann["label"] = pd.to_numeric(df_ann["label"], errors="coerce")
+        df_ann = df_ann[df_ann["label"].notna()][[cfg.group_by_col, "label"]].drop_duplicates(
+            subset=[cfg.group_by_col], keep="last"
+        )
+    else:
+        df_ann = pd.DataFrame(columns=[cfg.group_by_col, "label"])
 
     X_train, y_train, X_test, y_test, X_all, processed = build_datasets(
         groups=groups,
@@ -232,7 +239,7 @@ def train_and_predict(cfg: CnnConfig) -> dict:
         "device": device,
         "model_path": model_path.as_posix(),
         "num_samples": len(keys),
-        "num_annotated": int(df_ann[cfg.group_by_col].isin(keys).sum()),
+        "num_annotated": int(df_ann[cfg.group_by_col].isin(keys).sum()) if cfg.group_by_col in df_ann.columns else 0,
         "final_loss": float(history.history["loss"][-1]) if history.history.get("loss") else None,
         "final_val_loss": float(history.history["val_loss"][-1]) if history.history.get("val_loss") else None,
         "output_path": cfg.output_path,

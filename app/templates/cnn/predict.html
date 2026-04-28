@@ -48,6 +48,11 @@
           <p class="text-secondary mb-2">
             The prediction CSV should use the same time-series structure as training input.
           </p>
+          <p class="mb-3">
+            <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('static', filename='prediction_template.csv') }}" download>
+              Download sample template
+            </a>
+          </p>
           <ul class="mb-2">
             <li>One row per time step</li>
             <li>A sample/group column like <code>{{ cfg.group_by_col }}</code></li>

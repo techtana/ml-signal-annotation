@@ -4,12 +4,13 @@ from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
-from flask import Blueprint, flash, jsonify, redirect, render_template, request, url_for
+from flask import Blueprint, flash, jsonify, redirect, render_template, request, session, url_for
 
 from ..services.annotations import load_annotations, upsert_annotation
 from ..services.cnn_pipeline import CnnConfig, find_latest_model, load_and_group, predict_only, train_and_predict
 from ..services.config_store import load_config, save_config
 from ..services.state import load_state, reset_state, save_state
+from ..services.trace_files import delete_temp_trace, is_temp_upload, save_uploaded_trace
 from utils.preprocess import normalize
 
 bp = Blueprint("cnn", __name__)
@@ -83,17 +84,71 @@ def _get_groups_and_keys(cfg: CnnConfig):
     return groups, keys, channel_cols, max_len
 
 
+def _sample_trace_options():
+    return [p.as_posix() for p in sorted(Path("data").glob("*.csv"))]
+
+
+def _active_trace_path(cfg: CnnConfig) -> str | None:
+    return session.get("active_trace_path") or cfg.data_path
+
+
+@bp.route("/source", methods=["GET", "POST"])
+def source():
+    cfg = load_config()
+    sample_files = _sample_trace_options()
+    active_trace_path = _active_trace_path(cfg)
+
+    if request.method == "POST":
+        previous = session.get("active_trace_path")
+        selected_sample = request.form.get("sample_path", "").strip()
+        uploaded = request.files.get("trace_file")
+
+        new_path = None
+        if uploaded and uploaded.filename:
+            new_path = save_uploaded_trace(uploaded)
+            flash("Uploaded trace file loaded for this session only.", "success")
+        elif selected_sample:
+            new_path = selected_sample
+            flash("Sample trace file selected.", "success")
+        else:
+            flash("Choose a sample file or upload a trace CSV.", "danger")
+            return render_template(
+                "cnn/source.html",
+                cfg=cfg,
+                sample_files=sample_files,
+                active_trace_path=active_trace_path,
+            )
+
+        if is_temp_upload(previous) and previous != new_path:
+            delete_temp_trace(previous)
+
+        session["active_trace_path"] = new_path
+        state = load_state()
+        if state is not None:
+            reset_state(keys=state.keys, trim_ratio=cfg.trim_ratio)
+        return redirect(url_for("cnn.annotate"))
+
+    return render_template(
+        "cnn/source.html",
+        cfg=cfg,
+        sample_files=sample_files,
+        active_trace_path=active_trace_path,
+    )
+
+
 @bp.get("/annotate")
 def annotate():
     cfg = load_config()
-    if not Path(cfg.data_path).exists():
-        flash(f"Missing input data CSV: {cfg.data_path}", "danger")
-        return render_template("cnn/annotate.html", cfg=cfg, ready=False)
+    active_trace_path = _active_trace_path(cfg)
+    if not active_trace_path or not Path(active_trace_path).exists():
+        flash("Select or upload a trace CSV before annotating.", "warning")
+        return redirect(url_for("cnn.source"))
 
-    groups, keys, channel_cols, _ = _get_groups_and_keys(cfg)
+    runtime_cfg = replace(cfg, data_path=active_trace_path)
+    groups, keys, channel_cols, _ = _get_groups_and_keys(runtime_cfg)
     state = load_state()
     if state is None or not state.keys:
-        state = reset_state(keys=keys, trim_ratio=cfg.trim_ratio)
+        state = reset_state(keys=keys, trim_ratio=runtime_cfg.trim_ratio)
     else:
         # If dataset contents or ordering changed, rebuild state in sorted order.
         if state.keys != keys:
@@ -103,12 +158,12 @@ def annotate():
             elif state.keys:
                 current_key = state.keys[-1]
 
-            state = reset_state(keys=keys, trim_ratio=cfg.trim_ratio)
+            state = reset_state(keys=keys, trim_ratio=runtime_cfg.trim_ratio)
             if current_key in keys:
                 state.idx = keys.index(current_key)
                 save_state(state)
 
-    df_ann = load_annotations(cfg.annotation_path, cfg.group_by_col)
+    df_ann = load_annotations(active_trace_path, cfg.group_by_col)
 
     # Review mode: allow browsing/adjusting labels even after reaching the end.
     review = state.idx >= len(state.keys)
@@ -128,7 +183,7 @@ def annotate():
         return render_template("cnn/annotate.html", cfg=cfg, ready=False)
 
     trace = groups[key]
-    trim = int(len(trace) * cfg.trim_ratio)
+    trim = int(len(trace) * runtime_cfg.trim_ratio)
     trimmed = normalize(trace.iloc[trim : len(trace) - trim])
 
     existing = df_ann[df_ann[cfg.group_by_col] == str(key)]
@@ -144,6 +199,7 @@ def annotate():
         "cnn/annotate.html",
         cfg=cfg,
         ready=True,
+        active_trace_path=active_trace_path,
         key=key,
         idx=idx,
         total=len(state.keys),
@@ -163,7 +219,12 @@ def annotate():
 @bp.post("/annotate/reset")
 def annotate_reset():
     cfg = load_config()
-    groups, keys, _, _ = _get_groups_and_keys(cfg)
+    active_trace_path = _active_trace_path(cfg)
+    if not active_trace_path or not Path(active_trace_path).exists():
+        flash("Select or upload a trace CSV before annotating.", "warning")
+        return redirect(url_for("cnn.source"))
+    runtime_cfg = replace(cfg, data_path=active_trace_path)
+    groups, keys, _, _ = _get_groups_and_keys(runtime_cfg)
     reset_state(keys=keys, trim_ratio=cfg.trim_ratio)
     flash("Reset annotation session.", "info")
     return redirect(url_for("cnn.annotate"))
@@ -183,13 +244,16 @@ def annotate_skip():
 @bp.post("/annotate/label")
 def annotate_label():
     cfg = load_config()
+    active_trace_path = _active_trace_path(cfg)
+    if not active_trace_path or not Path(active_trace_path).exists():
+        return jsonify({"ok": False, "error": "Select or upload a trace CSV first."}), 400
     payload = request.get_json(silent=True) or {}
     key = str(payload.get("key", "")).strip()
     label = payload.get("label", None)
     if not key or label is None:
         return jsonify({"ok": False, "error": "key and label are required"}), 400
 
-    upsert_annotation(path=cfg.annotation_path, group_by_col=cfg.group_by_col, key=key, label=float(label))
+    upsert_annotation(path=active_trace_path, group_by_col=cfg.group_by_col, key=key, label=float(label))
 
     state = load_state()
     if state is not None and state.idx < len(state.keys) and state.keys[state.idx] == key:
@@ -203,18 +267,19 @@ def annotate_label():
 def train():
     cfg = load_config()
     summary = None
+    active_trace_path = _active_trace_path(cfg)
     if request.method == "POST":
-        if not Path(cfg.annotation_path).exists():
-            flash(f"Missing annotations CSV: {cfg.annotation_path}", "danger")
+        if not active_trace_path or not Path(active_trace_path).exists():
+            flash("Select or upload an annotated trace CSV first.", "danger")
             return redirect(url_for("cnn.train"))
         try:
-            summary = train_and_predict(cfg)
+            summary = train_and_predict(replace(cfg, data_path=active_trace_path))
             flash("Training complete. Predictions written.", "success")
         except Exception as e:
             flash(f"Training failed: {e}", "danger")
 
-    df_ann = load_annotations(cfg.annotation_path, cfg.group_by_col)
-    return render_template("cnn/train.html", cfg=cfg, summary=summary, annotated_count=len(df_ann))
+    df_ann = load_annotations(active_trace_path, cfg.group_by_col) if active_trace_path and Path(active_trace_path).exists() else pd.DataFrame()
+    return render_template("cnn/train.html", cfg=cfg, summary=summary, annotated_count=len(df_ann), active_trace_path=active_trace_path)
 
 
 @bp.route("/predict", methods=["GET", "POST"])
@@ -265,7 +330,8 @@ def predict():
 @bp.get("/results")
 def results():
     cfg = load_config()
-    ann = load_annotations(cfg.annotation_path, cfg.group_by_col)
+    active_trace_path = _active_trace_path(cfg)
+    ann = load_annotations(active_trace_path, cfg.group_by_col) if active_trace_path and Path(active_trace_path).exists() else pd.DataFrame()
     pred_path = Path(cfg.output_path)
     preds = None
     if pred_path.exists():
@@ -274,6 +340,7 @@ def results():
     return render_template(
         "cnn/results.html",
         cfg=cfg,
+        active_trace_path=active_trace_path,
         annotations=ann.to_dict(orient="records"),
         predictions=(preds.to_dict(orient="records") if preds is not None else None),
     )
