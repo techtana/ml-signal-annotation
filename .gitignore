@@ -1,0 +1,111 @@
+################################################################################
+# Python / tooling
+################################################################################
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
+
+################################################################################
+# Environments
+################################################################################
+.venv/
+venv/
+ENV/
+env/
+.env
+.env.*
+
+################################################################################
+# Jupyter
+################################################################################
+.ipynb_checkpoints/
+
+################################################################################
+# Build / packaging
+################################################################################
+build/
+dist/
+*.egg-info/
+
+################################################################################
+# Logs
+################################################################################
+*.log
+
+################################################################################
+# ML artifacts / outputs (repo-specific)
+################################################################################
+# Model training outputs (train.py saves here per README)
+artifacts/
+
+# TensorFlow / Keras checkpoints & saved models
+*.ckpt
+*.ckpt.*
+*.h5
+*.keras
+saved_model/
+**/saved_model/
+
+# Common experiment / run outputs
+runs/
+outputs/
+wandb/
+mlruns/
+
+# Generated plots (scoped to output folders)
+plots/
+**/plots/
+artifacts/**/*.png
+artifacts/**/*.svg
+artifacts/**/*.pdf
+plots/**/*.png
+plots/**/*.svg
+plots/**/*.pdf
+
+################################################################################
+# Data caching / intermediate files (component 2)
+################################################################################
+*.parquet
+*.arrow
+*.feather
+
+################################################################################
+# Local-only config / secrets
+################################################################################
+# Created locally per README for schema validation
+hive_schema.json
+
+# Spark / database / credential material (if added later)
+*.key
+*.pem
+credentials*.json
+
+################################################################################
+# Data files (keep small tracked examples)
+################################################################################
+# Ignore raw input traces by default (often large)
+data/traces.csv
+
+# If you introduce new local data exports, ignore them…
+data/**/*.csv
+data/**/*.tsv
+
+# …but keep the repo's example outputs currently tracked (if desired)
+!data/annotations.csv
+!data/predictions.csv
