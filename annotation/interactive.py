@@ -1,7 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import math
-from matplotlib.patches import Rectangle
 
 
 class InteractiveAnnotation_heatmap:
@@ -19,6 +18,7 @@ class InteractiveAnnotation_heatmap:
         self.data = data
         self.retval = -1
         self.result = None
+        self._vline = None
 
     @staticmethod
     def find_nearest(array, value):
@@ -39,12 +39,13 @@ class InteractiveAnnotation_heatmap:
     def onMotion(self, event):
         if not event.inaxes:
             return
-        xint = int(event.xdata) - 0.5
-        rect = Rectangle((xint, -0.5), 1, len(self.data),
-                          fill=False, linestyle='dashed', edgecolor='green', linewidth=2.0)
-        self.ax.add_patch(rect)
-        self.ax.figure.canvas.draw()
-        rect.remove()
+        if self._vline is None:
+            self._vline = self.ax.axvline(
+                x=event.xdata, color='lime', linestyle='--', linewidth=1.5, alpha=0.8
+            )
+        else:
+            self._vline.set_xdata([event.xdata, event.xdata])
+        self.ax.figure.canvas.draw_idle()
 
     def annotate(self, fig=None, ax=None):
         """Display this sample and wait for a click.
@@ -63,6 +64,7 @@ class InteractiveAnnotation_heatmap:
             window was closed without clicking.
         """
         self._standalone = fig is None
+        self._vline = None
         if self._standalone:
             fig = plt.figure(figsize=(12, 8))
             ax = fig.add_subplot(111)
@@ -119,6 +121,7 @@ class InteractiveAnnotation_2dplot:
         self.plottitle = plottitle or "Click on graph to annotate."
         self.retval = -1
         self.result = None
+        self._vline = None
 
     @staticmethod
     def find_nearest(array, value):
@@ -139,12 +142,13 @@ class InteractiveAnnotation_2dplot:
     def onMotion(self, event):
         if not event.inaxes:
             return
-        xint = int(event.xdata) - 0.5
-        rect = Rectangle((xint, -0.5), 1, len(self.data),
-                          fill=False, linestyle='dashed', edgecolor='black', linewidth=2.0)
-        self.ax.add_patch(rect)
-        self.ax.figure.canvas.draw()
-        rect.remove()
+        if self._vline is None:
+            self._vline = self.ax.axvline(
+                x=event.xdata, color='gray', linestyle='--', linewidth=1.0, alpha=0.8
+            )
+        else:
+            self._vline.set_xdata([event.xdata, event.xdata])
+        self.ax.figure.canvas.draw_idle()
 
     def annotate(self, fig=None, ax=None):
         """Display this sample and wait for a click.
@@ -163,6 +167,7 @@ class InteractiveAnnotation_2dplot:
             if the window was closed without clicking.
         """
         self._standalone = fig is None
+        self._vline = None
         if self._standalone:
             fig = plt.figure(figsize=(12, 8))
             ax = fig.add_subplot(111)

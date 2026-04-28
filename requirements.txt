@@ -6,6 +6,8 @@ pyarrow>=13.0          # parquet I/O in the regression pipeline
 # ML
 scikit-learn>=1.3      # MinMaxScaler, PLSRegression, train_test_split, metrics
 tensorflow>=2.13       # includes keras (Sequential, Conv2D, etc.) used in train.py
+# tensorflow-directml-plugin  # Windows-only: GPU via DirectML (works on NVIDIA + AMD)
+#                             # install separately: pip install tensorflow-directml-plugin
 
 # Visualisation
 matplotlib>=3.7

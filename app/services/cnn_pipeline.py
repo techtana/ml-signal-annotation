@@ -12,11 +12,21 @@ from sklearn.model_selection import train_test_split
 from utils.preprocess import equalize_length, normalize
 
 
+ANNOTATIONS_DIR = Path("data") / "annotations"
+
+
+def annotation_path_for(trace_path: str) -> Path:
+    """Derive the companion annotation file path from a trace file path.
+
+    data/traces/foo.csv  ->  data/annotations/foo_annotations.csv
+    """
+    return ANNOTATIONS_DIR / (Path(trace_path).stem + "_annotations.csv")
+
+
 @dataclass(frozen=True)
 class CnnConfig:
-    data_path: str = "data/traces.csv"
-    annotation_path: str = "data/annotations.csv"
-    output_path: str = "data/predictions.csv"
+    data_path: str = "data/traces/traces.csv"
+    output_path: str = "data/predictions/predictions.csv"
 
     group_by_col: str = "run_id"
     time_index_col: str = "elapsed_time"
@@ -156,16 +166,17 @@ def _get_gpu_total_memory_mb() -> int:
 
 def build_model(*, input_shape: tuple[int, int, int], max_len: int, device: str):
     import tensorflow as tf
-    from keras.layers import Conv2D, Dense, Flatten, MaxPooling2D
+    from keras.layers import Conv2D, Dense, Flatten, Input, MaxPooling2D
     from keras.models import Sequential
 
     with tf.device(device):
         model = Sequential(
             [
-                Conv2D(32, kernel_size=(5, 1), strides=(1, 1), activation="relu", input_shape=input_shape),
-                MaxPooling2D(pool_size=(2, 2), strides=(2, 2)),
+                Input(shape=input_shape),
+                Conv2D(32, kernel_size=(5, 1), strides=(1, 1), activation="relu"),
+                MaxPooling2D(pool_size=(2, 1), strides=(2, 1)),
                 Conv2D(64, kernel_size=(5, 1), activation="relu"),
-                MaxPooling2D(pool_size=(2, 2)),
+                MaxPooling2D(pool_size=(2, 1), strides=(2, 1)),
                 Flatten(),
                 Dense(max_len, activation="relu"),
                 Dense(1, activation="linear"),
@@ -184,10 +195,10 @@ def train_and_predict(cfg: CnnConfig) -> dict:
     )
     keys = list(groups.keys())
 
-    df_ann = pd.read_csv(cfg.data_path)
-    if cfg.group_by_col in df_ann.columns:
-        df_ann[cfg.group_by_col] = df_ann[cfg.group_by_col].map(normalize_sample_key)
-    if "label" in df_ann.columns:
+    ann_path = annotation_path_for(cfg.data_path)
+    if ann_path.exists():
+        df_ann = pd.read_csv(ann_path)
+        df_ann[cfg.group_by_col] = df_ann[cfg.group_by_col].astype(str).map(normalize_sample_key)
         df_ann["label"] = pd.to_numeric(df_ann["label"], errors="coerce")
         df_ann = df_ann[df_ann["label"].notna()][[cfg.group_by_col, "label"]].drop_duplicates(
             subset=[cfg.group_by_col], keep="last"

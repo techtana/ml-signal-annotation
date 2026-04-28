@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+import io
+import zipfile
 from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
-from flask import Blueprint, flash, jsonify, redirect, render_template, request, session, url_for
+from flask import Blueprint, flash, jsonify, redirect, render_template, request, send_file, session, url_for
 
 from ..services.annotations import load_annotations, upsert_annotation
-from ..services.cnn_pipeline import CnnConfig, find_latest_model, load_and_group, predict_only, train_and_predict
+from ..services.cnn_pipeline import (
+    CnnConfig,
+    annotation_path_for,
+    find_latest_model,
+    load_and_group,
+    normalize_sample_key,
+    predict_only,
+    train_and_predict,
+)
 from ..services.config_store import load_config, save_config
 from ..services.state import load_state, reset_state, save_state
 from ..services.trace_files import delete_temp_trace, is_temp_upload, save_uploaded_trace
@@ -51,7 +61,6 @@ def settings():
 
         cfg = CnnConfig(
             data_path=request.form.get("data_path", cfg.data_path).strip() or cfg.data_path,
-            annotation_path=request.form.get("annotation_path", cfg.annotation_path).strip() or cfg.annotation_path,
             output_path=request.form.get("output_path", cfg.output_path).strip() or cfg.output_path,
             group_by_col=request.form.get("group_by_col", cfg.group_by_col).strip() or cfg.group_by_col,
             time_index_col=request.form.get("time_index_col", cfg.time_index_col).strip() or cfg.time_index_col,
@@ -84,8 +93,12 @@ def _get_groups_and_keys(cfg: CnnConfig):
     return groups, keys, channel_cols, max_len
 
 
-def _sample_trace_options():
-    return [p.as_posix() for p in sorted(Path("data").glob("*.csv"))]
+def _trace_file_options() -> list[str]:
+    """Return CSVs from data/traces/ only."""
+    traces_dir = Path("data") / "traces"
+    if not traces_dir.exists():
+        return []
+    return [p.as_posix() for p in sorted(traces_dir.glob("*.csv"))]
 
 
 def _active_trace_path(cfg: CnnConfig) -> str | None:
@@ -95,7 +108,7 @@ def _active_trace_path(cfg: CnnConfig) -> str | None:
 @bp.route("/source", methods=["GET", "POST"])
 def source():
     cfg = load_config()
-    sample_files = _sample_trace_options()
+    sample_files = _trace_file_options()
     active_trace_path = _active_trace_path(cfg)
 
     if request.method == "POST":
@@ -134,6 +147,29 @@ def source():
     )
 
 
+@bp.get("/download-sample")
+def download_sample():
+    """Return a ZIP containing a sample trace CSV and its companion annotation CSV."""
+    # Use sample_b which has both traces and pre-generated annotations.
+    trace_path = Path("data") / "traces" / "sample_b_traces.csv"
+    ann_path = annotation_path_for(trace_path.as_posix())
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        if trace_path.exists():
+            zf.write(trace_path, "sample_traces.csv")
+        if ann_path.exists():
+            zf.write(ann_path, "sample_annotations.csv")
+    buf.seek(0)
+
+    return send_file(
+        buf,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name="sample_data.zip",
+    )
+
+
 @bp.get("/annotate")
 def annotate():
     cfg = load_config()
@@ -151,7 +187,6 @@ def annotate():
     if state is None or not state.keys:
         state = reset_state(keys=keys, trim_ratio=runtime_cfg.trim_ratio)
     else:
-        # If dataset contents or ordering changed, rebuild state in sorted order.
         if state.keys != keys:
             current_key = None
             if 0 <= state.idx < len(state.keys):
@@ -166,7 +201,6 @@ def annotate():
 
     df_ann = load_annotations(active_trace_path, cfg.group_by_col)
 
-    # Review mode: allow browsing/adjusting labels even after reaching the end.
     review = state.idx >= len(state.keys)
     requested_key = request.args.get("key", "").strip()
     if requested_key and requested_key in groups:
@@ -287,10 +321,10 @@ def train():
 def predict():
     cfg = load_config()
     latest = find_latest_model(cfg.artifacts_dir)
-    csv_options = sorted(Path("data").glob("*.csv"))
-    csv_options = [p.as_posix() for p in csv_options]
+    csv_options = _trace_file_options()
     selected_data_path = cfg.data_path
     summary = None
+
     if request.method == "POST":
         selected_data_path = (
             request.form.get("data_path", "").strip()
@@ -303,20 +337,18 @@ def predict():
             return redirect(url_for("cnn.predict"))
         if not Path(selected_data_path).exists():
             flash(f"Prediction data file not found: {selected_data_path}", "danger")
-            return render_template(
-                "cnn/predict.html",
-                cfg=cfg,
-                latest_model=latest,
-                summary=summary,
-                csv_options=csv_options,
-                selected_data_path=selected_data_path,
-            )
-        try:
-            predict_cfg = replace(cfg, data_path=selected_data_path)
-            summary = predict_only(cfg=predict_cfg, model_path=model_path)
-            flash("Prediction complete. Predictions written.", "success")
-        except Exception as e:
-            flash(f"Prediction failed: {e}", "danger")
+        else:
+            try:
+                predict_cfg = replace(cfg, data_path=selected_data_path)
+                summary = predict_only(cfg=predict_cfg, model_path=model_path)
+                flash("Prediction complete. Predictions written.", "success")
+            except Exception as e:
+                flash(f"Prediction failed: {e}", "danger")
+
+    predictions = None
+    pred_path = Path(cfg.output_path)
+    if pred_path.exists():
+        predictions = pd.read_csv(pred_path).to_dict(orient="records")
 
     return render_template(
         "cnn/predict.html",
@@ -325,24 +357,45 @@ def predict():
         summary=summary,
         csv_options=csv_options,
         selected_data_path=selected_data_path,
+        predictions=predictions,
     )
 
 
-@bp.get("/results")
-def results():
+@bp.get("/predict/sample-data")
+def predict_sample_data():
     cfg = load_config()
-    active_trace_path = _active_trace_path(cfg)
-    ann = load_annotations(active_trace_path, cfg.group_by_col) if active_trace_path and Path(active_trace_path).exists() else pd.DataFrame()
+    key = request.args.get("key", "").strip()
+    data_path = request.args.get("data_path", cfg.data_path).strip()
+
+    if not key:
+        return jsonify({"error": "key is required"}), 400
+    if not Path(data_path).exists():
+        return jsonify({"error": f"Trace file not found: {data_path}"}), 404
+
     pred_path = Path(cfg.output_path)
-    preds = None
-    if pred_path.exists():
-        preds = pd.read_csv(pred_path)
+    if not pred_path.exists():
+        return jsonify({"error": "No predictions file found"}), 404
 
-    return render_template(
-        "cnn/results.html",
-        cfg=cfg,
-        active_trace_path=active_trace_path,
-        annotations=ann.to_dict(orient="records"),
-        predictions=(preds.to_dict(orient="records") if preds is not None else None),
-    )
+    groups, _, _ = load_and_group(data_path, cfg.group_by_col, cfg.time_index_col, cfg.channel_cols)
+    norm_key = normalize_sample_key(key)
 
+    if norm_key not in groups:
+        return jsonify({"error": f"Sample '{key}' not found in {data_path}"}), 404
+
+    trace = groups[norm_key]
+    trim = int(len(trace) * cfg.trim_ratio)
+    trimmed = normalize(trace.iloc[trim: len(trace) - trim])
+
+    preds_df = pd.read_csv(pred_path)
+    preds_df["_norm_key"] = preds_df[cfg.group_by_col].astype(str).map(normalize_sample_key)
+    match = preds_df[preds_df["_norm_key"] == norm_key]
+    predicted_position = float(match["predicted_position"].iloc[0]) if len(match) else None
+
+    return jsonify({
+        "x": [float(v) for v in trimmed.index.values],
+        "series": [
+            {"name": col, "y": [float(v) for v in trimmed[col].values]}
+            for col in trimmed.columns
+        ],
+        "predicted_position": predicted_position,
+    })
