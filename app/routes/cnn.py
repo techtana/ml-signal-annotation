@@ -94,9 +94,18 @@ def annotate():
     if state is None or not state.keys:
         state = reset_state(keys=keys, trim_ratio=cfg.trim_ratio)
     else:
-        # If dataset changed, reset automatically
-        if set(state.keys) != set(keys):
+        # If dataset contents or ordering changed, rebuild state in sorted order.
+        if state.keys != keys:
+            current_key = None
+            if 0 <= state.idx < len(state.keys):
+                current_key = state.keys[state.idx]
+            elif state.keys:
+                current_key = state.keys[-1]
+
             state = reset_state(keys=keys, trim_ratio=cfg.trim_ratio)
+            if current_key in keys:
+                state.idx = keys.index(current_key)
+                save_state(state)
 
     df_ann = load_annotations(cfg.annotation_path, cfg.group_by_col)
 

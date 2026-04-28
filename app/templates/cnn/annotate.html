@@ -16,7 +16,7 @@
       </div>
     </div>
     <div class="d-flex gap-2">
-      {% if ready and review %}
+      {% if ready %}
         <div class="btn-group" role="group" aria-label="Review navigation">
           <a class="btn btn-outline-secondary {% if not has_prev %}disabled{% endif %}"
              href="{% if has_prev %}{{ url_for('cnn.annotate', key=prev_key) }}{% else %}#{% endif %}">
