@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -220,19 +221,45 @@ def train():
 def predict():
     cfg = load_config()
     latest = find_latest_model(cfg.artifacts_dir)
+    csv_options = sorted(Path("data").glob("*.csv"))
+    csv_options = [p.as_posix() for p in csv_options]
+    selected_data_path = cfg.data_path
     summary = None
     if request.method == "POST":
+        selected_data_path = (
+            request.form.get("data_path", "").strip()
+            or request.form.get("data_path_manual", "").strip()
+            or cfg.data_path
+        )
         model_path = request.form.get("model_path", "").strip() or latest
         if not model_path:
             flash("No model found. Train first or provide a model path.", "danger")
             return redirect(url_for("cnn.predict"))
+        if not Path(selected_data_path).exists():
+            flash(f"Prediction data file not found: {selected_data_path}", "danger")
+            return render_template(
+                "cnn/predict.html",
+                cfg=cfg,
+                latest_model=latest,
+                summary=summary,
+                csv_options=csv_options,
+                selected_data_path=selected_data_path,
+            )
         try:
-            summary = predict_only(cfg=cfg, model_path=model_path)
+            predict_cfg = replace(cfg, data_path=selected_data_path)
+            summary = predict_only(cfg=predict_cfg, model_path=model_path)
             flash("Prediction complete. Predictions written.", "success")
         except Exception as e:
             flash(f"Prediction failed: {e}", "danger")
 
-    return render_template("cnn/predict.html", cfg=cfg, latest_model=latest, summary=summary)
+    return render_template(
+        "cnn/predict.html",
+        cfg=cfg,
+        latest_model=latest,
+        summary=summary,
+        csv_options=csv_options,
+        selected_data_path=selected_data_path,
+    )
 
 
 @bp.get("/results")
