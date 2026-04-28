@@ -5,6 +5,7 @@ to predict the labeled event position automatically.
 Edit the Parameters section before running.
 """
 
+import os
 import random
 import datetime
 import numpy as np
@@ -34,6 +35,14 @@ RANDOM_STATE     = 42
 BATCH_SIZE       = 200
 NUM_EPOCHS       = 100
 VERBOSE          = True
+
+# GPU settings
+# Set to True to use GPU if available, False to force CPU.
+# When True and no GPU is found, falls back to CPU automatically.
+USE_GPU          = True
+# Fraction of GPU memory to pre-allocate (0.0–1.0).
+# None lets TensorFlow grow memory dynamically (recommended for shared machines).
+GPU_MEMORY_FRACTION = None
 # ---------------------------------------------------------------------------
 
 
@@ -54,23 +63,41 @@ def load_and_group(path: str, group_col: str, time_col: str, channel_cols):
     return groups, channel_cols, max_len
 
 
-def run_annotation(groups: dict, keys: list, max_len: int, trim_ratio: float, count: int | None):
-    annotations = []
+def run_annotation(groups: dict, keys: list, trim_ratio: float, count: int | None) -> pd.DataFrame:
+    """Interactively annotate samples in a single persistent window.
+
+    If ANNOTATION_PATH already exists on disk the annotation step is
+    skipped and the existing file is loaded instead.
+    """
+    if os.path.exists(ANNOTATION_PATH):
+        print(f"Annotations already exist at '{ANNOTATION_PATH}' — skipping annotation.")
+        return pd.read_csv(ANNOTATION_PATH)
+
     total = count if count is not None else len(keys)
+    annotations = []
+
+    fig, ax = plt.subplots(figsize=(12, 8))
 
     for i, key in enumerate(keys):
         if count is not None and i >= count:
             break
         trace = groups[key]
-        trim = int(len(trace) * trim_ratio)
+        trim  = int(len(trace) * trim_ratio)
         trimmed = normalize(trace.iloc[trim: len(trace) - trim])
+
         label = InteractiveAnnotation_2dplot(
             trimmed,
             plottitle=f"Sample {key}  ({i + 1} / {total})"
-        ).annotate()
+        ).annotate(fig=fig, ax=ax)
+
+        if label is None:
+            print(f"  sample {key} skipped (window closed)")
+            continue
+
         annotations.append([key, label])
         print(f"  label = {label}")
 
+    plt.close(fig)
     return pd.DataFrame(annotations, columns=[GROUP_BY_COL, "label"])
 
 
@@ -106,24 +133,85 @@ def build_datasets(groups: dict, keys: list, df_annotations: pd.DataFrame,
     return X_train, y_train, X_test, y_test, X_all, processed
 
 
-def build_model(input_shape: tuple, max_len: int):
+def configure_gpu():
+    """Configure TensorFlow GPU usage based on USE_GPU / GPU_MEMORY_FRACTION.
+
+    Returns the device string to use for model training.
+    """
+    import tensorflow as tf
+
+    gpus = tf.config.list_physical_devices("GPU")
+
+    if not USE_GPU or not gpus:
+        if USE_GPU and not gpus:
+            print("No GPU detected — falling back to CPU.")
+        else:
+            print("GPU disabled by USE_GPU=False — using CPU.")
+        tf.config.set_visible_devices([], "GPU")
+        return "/CPU:0"
+
+    # GPU available and requested
+    try:
+        if GPU_MEMORY_FRACTION is None:
+            # Grow memory only as needed; avoids allocating the entire VRAM upfront
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print(f"GPU enabled (memory growth): {[g.name for g in gpus]}")
+        else:
+            # Pre-allocate a fixed fraction of VRAM on the first GPU
+            limit_mb = int(
+                GPU_MEMORY_FRACTION
+                * _get_gpu_total_memory_mb(gpus[0])
+            )
+            tf.config.set_logical_device_configuration(
+                gpus[0],
+                [tf.config.LogicalDeviceConfiguration(memory_limit=limit_mb)],
+            )
+            print(f"GPU enabled (memory limit {limit_mb} MB): {gpus[0].name}")
+    except RuntimeError as e:
+        # Configuration must happen before any GPU ops; warn but continue
+        print(f"GPU configuration warning: {e}")
+
+    return "/GPU:0"
+
+
+def _get_gpu_total_memory_mb(gpu_device) -> int:
+    """Return total VRAM in MB for the given PhysicalDevice, or 4096 as a fallback."""
+    try:
+        import subprocess, re
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5
+        )
+        values = [int(v.strip()) for v in result.stdout.strip().splitlines() if v.strip().isdigit()]
+        return values[0] if values else 4096
+    except Exception:
+        return 4096
+
+
+def build_model(input_shape: tuple, max_len: int, device: str = "/CPU:0"):
+    import tensorflow as tf
     from keras.models import Sequential
     from keras.layers import Conv2D, MaxPooling2D, Flatten, Dense
 
-    model = Sequential([
-        Conv2D(32, kernel_size=(5, 1), strides=(1, 1), activation="relu", input_shape=input_shape),
-        MaxPooling2D(pool_size=(2, 2), strides=(2, 2)),
-        Conv2D(64, kernel_size=(5, 1), activation="relu"),
-        MaxPooling2D(pool_size=(2, 2)),
-        Flatten(),
-        Dense(max_len, activation="relu"),
-        Dense(1, activation="linear"),
-    ])
-    model.compile(loss="mean_squared_error", optimizer="adam", metrics=["mean_squared_error"])
+    with tf.device(device):
+        model = Sequential([
+            Conv2D(32, kernel_size=(5, 1), strides=(1, 1), activation="relu", input_shape=input_shape),
+            MaxPooling2D(pool_size=(2, 2), strides=(2, 2)),
+            Conv2D(64, kernel_size=(5, 1), activation="relu"),
+            MaxPooling2D(pool_size=(2, 2)),
+            Flatten(),
+            Dense(max_len, activation="relu"),
+            Dense(1, activation="linear"),
+        ])
+        model.compile(loss="mean_squared_error", optimizer="adam", metrics=["mean_squared_error"])
     return model
 
 
 def main():
+    # Configure GPU (or CPU fallback) before any Keras/TF ops
+    device = configure_gpu()
+
     # Load and group data
     groups, channel_cols, max_len = load_and_group(
         DATA_PATH, GROUP_BY_COL, TIME_INDEX_COL, CHANNEL_COLS
@@ -146,9 +234,11 @@ def main():
         plt.show()
         print(f"Samples: {len(keys)} | Channels: {len(channel_cols)} | Max length: {max_len}")
 
-    # Annotate
-    df_annotations = run_annotation(groups, keys, max_len, TRIM_RATIO, ANNOTATE_COUNT)
-    df_annotations.to_csv(ANNOTATION_PATH, index=False)
+    # Annotate (skipped automatically if ANNOTATION_PATH exists)
+    df_annotations = run_annotation(groups, keys, TRIM_RATIO, ANNOTATE_COUNT)
+    if not os.path.exists(ANNOTATION_PATH):
+        os.makedirs(os.path.dirname(ANNOTATION_PATH) or ".", exist_ok=True)
+        df_annotations.to_csv(ANNOTATION_PATH, index=False)
 
     # Build datasets
     X_train, y_train, X_test, y_test, X_all, processed = build_datasets(
@@ -165,7 +255,7 @@ def main():
 
     # Build and train model
     input_shape = (max_len, len(channel_cols), 1)
-    model = build_model(input_shape, max_len)
+    model = build_model(input_shape, max_len, device=device)
     if VERBOSE:
         model.summary()
 
@@ -179,6 +269,7 @@ def main():
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     model_path = f"artifacts/cnn_regressor_{timestamp}.keras"
+    os.makedirs("artifacts", exist_ok=True)
     model.save(model_path)
     if VERBOSE:
         plot_training_history(history)

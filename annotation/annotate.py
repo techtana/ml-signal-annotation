@@ -4,12 +4,17 @@ Basic annotation script.
 Loads grouped time-series data from a CSV, displays each group
 interactively, and saves the user's click-selected labels to a CSV.
 
+If OUTPUT_PATH already exists the annotation step is skipped entirely
+and the existing file is used as-is.
+
 Edit the Parameters section below before running.
 """
 
+import os
 import random
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from sklearn import preprocessing
 from annotation.interactive import InteractiveAnnotation_2dplot
 
@@ -35,6 +40,16 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def main():
+    # ------------------------------------------------------------------
+    # Skip annotation if output already exists
+    # ------------------------------------------------------------------
+    if os.path.exists(OUTPUT_PATH):
+        print(f"Annotations already exist at '{OUTPUT_PATH}' — skipping annotation.")
+        return
+
+    # ------------------------------------------------------------------
+    # Load and group data
+    # ------------------------------------------------------------------
     df = pd.read_csv(DATA_PATH)
     if TIME_INDEX_COL in df.columns:
         df = df.sort_values(TIME_INDEX_COL)
@@ -52,23 +67,40 @@ def main():
         random.shuffle(keys)
 
     total = ANNOTATE_COUNT if ANNOTATE_COUNT is not None else len(keys)
+
+    # ------------------------------------------------------------------
+    # Annotate — one persistent window, updated in-place for each sample
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(12, 8))
     annotations = []
 
     for i, key in enumerate(keys):
         if ANNOTATE_COUNT is not None and i >= ANNOTATE_COUNT:
             break
         trace = collection[key]
-        trim = int(len(trace) * TRIM_RATIO)
+        trim  = int(len(trace) * TRIM_RATIO)
         trace = normalize(trace.iloc[trim: len(trace) - trim])
+
         label = InteractiveAnnotation_2dplot(
             trace,
             plottitle=f"Annotating sample {key}  ({i + 1} / {total})"
-        ).annotate()
+        ).annotate(fig=fig, ax=ax)
+
+        if label is None:
+            print(f"  sample {key} skipped (window closed)")
+            continue
+
         annotations.append([key, label])
         print(f"  label = {label}")
 
+    plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # Save
+    # ------------------------------------------------------------------
+    os.makedirs(os.path.dirname(OUTPUT_PATH) or ".", exist_ok=True)
     pd.DataFrame(annotations, columns=[GROUP_BY_COL, "label"]).to_csv(OUTPUT_PATH, index=False)
-    print(f"\nSaved {len(annotations)} annotations to {OUTPUT_PATH}")
+    print(f"\nSaved {len(annotations)} annotations to '{OUTPUT_PATH}'")
 
 
 if __name__ == "__main__":

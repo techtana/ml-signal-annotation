@@ -10,6 +10,9 @@ class InteractiveAnnotation_heatmap:
     Displays `data` as a 2-D heatmap. The user clicks on a column to
     select its x-axis position. `.annotate()` blocks until a click is
     received, then returns the float x value.
+
+    Pass an existing ``fig`` and ``ax`` to reuse the same window across
+    multiple calls instead of opening a new one each time.
     """
 
     def __init__(self, data):
@@ -25,15 +28,17 @@ class InteractiveAnnotation_heatmap:
         return array[idx]
 
     def onclick(self, event):
+        if event.inaxes is None:
+            return
         self.retval = event.xdata
         self.result = self.retval
         print(f"Selected x = {self.result}")
-        plt.close()
+        if self._standalone:
+            plt.close(self.fig)
 
     def onMotion(self, event):
         if not event.inaxes:
             return
-        self.retval = event.xdata
         xint = int(event.xdata) - 0.5
         rect = Rectangle((xint, -0.5), 1, len(self.data),
                           fill=False, linestyle='dashed', edgecolor='green', linewidth=2.0)
@@ -41,13 +46,51 @@ class InteractiveAnnotation_heatmap:
         self.ax.figure.canvas.draw()
         rect.remove()
 
-    def annotate(self):
-        self.fig = plt.figure(figsize=(12, 8))
-        self.ax = self.fig.add_subplot(111)
-        self.ax.imshow(self.data, cmap='hot', interpolation='nearest', aspect='auto')
-        self.fig.canvas.mpl_connect('motion_notify_event', self.onMotion)
-        self.fig.canvas.mpl_connect('button_press_event', self.onclick)
-        plt.show()
+    def annotate(self, fig=None, ax=None):
+        """Display this sample and wait for a click.
+
+        Parameters
+        ----------
+        fig, ax : optional
+            Existing figure and axes to reuse. When provided the window
+            stays open and its contents are updated in-place. When
+            omitted a new figure is created and closed after the click.
+
+        Returns
+        -------
+        float
+            The x-axis value at the click position, or ``None`` if the
+            window was closed without clicking.
+        """
+        self._standalone = fig is None
+        if self._standalone:
+            fig = plt.figure(figsize=(12, 8))
+            ax = fig.add_subplot(111)
+        else:
+            ax.cla()
+
+        self.fig = fig
+        self.ax = ax
+        self.result = None
+
+        ax.imshow(self.data, cmap='hot', interpolation='nearest', aspect='auto')
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+
+        motion_cid = fig.canvas.mpl_connect('motion_notify_event', self.onMotion)
+        click_cid  = fig.canvas.mpl_connect('button_press_event', self.onclick)
+
+        if self._standalone:
+            plt.show()
+        else:
+            while self.result is None:
+                if not plt.fignum_exists(fig.number):
+                    print("Warning: window closed without a click — sample skipped.")
+                    break
+                plt.pause(0.05)
+
+        fig.canvas.mpl_disconnect(motion_cid)
+        fig.canvas.mpl_disconnect(click_cid)
         return self.result
 
 
@@ -58,6 +101,9 @@ class InteractiveAnnotation_2dplot:
     The user clicks anywhere on the plot to select an x-axis index.
     `.annotate()` blocks until a click is received, then returns the
     integer x index of the click.
+
+    Pass an existing ``fig`` and ``ax`` to reuse the same window across
+    multiple calls instead of opening a new one each time.
 
     Parameters
     ----------
@@ -82,15 +128,17 @@ class InteractiveAnnotation_2dplot:
         return array[idx]
 
     def onclick(self, event):
+        if event.inaxes is None:
+            return
         self.retval = event.xdata
         self.result = int(self.retval)
         print(f"Selected index {self.result}")
-        plt.close()
+        if self._standalone:
+            plt.close(self.fig)
 
     def onMotion(self, event):
         if not event.inaxes:
             return
-        self.retval = event.xdata
         xint = int(event.xdata) - 0.5
         rect = Rectangle((xint, -0.5), 1, len(self.data),
                           fill=False, linestyle='dashed', edgecolor='black', linewidth=2.0)
@@ -98,16 +146,54 @@ class InteractiveAnnotation_2dplot:
         self.ax.figure.canvas.draw()
         rect.remove()
 
-    def annotate(self):
-        self.fig = plt.figure(figsize=(12, 8))
-        self.ax = self.fig.add_subplot(111)
-        self.ax.plot(self.data)
-        self.ax.set_title(self.plottitle)
-        self.ax.set_xlabel(self.data.index.name or "Time Index")
-        self.ax.set_ylabel("Normalized Value")
-        self.fig.canvas.mpl_connect('motion_notify_event', self.onMotion)
-        self.fig.canvas.mpl_connect('button_press_event', self.onclick)
-        plt.show()
+    def annotate(self, fig=None, ax=None):
+        """Display this sample and wait for a click.
+
+        Parameters
+        ----------
+        fig, ax : optional
+            Existing figure and axes to reuse. When provided the window
+            stays open and its contents are updated in-place. When
+            omitted a new figure is created and closed after the click.
+
+        Returns
+        -------
+        int
+            The integer x-axis index at the click position, or ``None``
+            if the window was closed without clicking.
+        """
+        self._standalone = fig is None
+        if self._standalone:
+            fig = plt.figure(figsize=(12, 8))
+            ax = fig.add_subplot(111)
+        else:
+            ax.cla()
+
+        self.fig = fig
+        self.ax = ax
+        self.result = None
+
+        ax.plot(self.data)
+        ax.set_title(self.plottitle)
+        ax.set_xlabel(self.data.index.name or "Time Index")
+        ax.set_ylabel("Normalized Value")
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+
+        motion_cid = fig.canvas.mpl_connect('motion_notify_event', self.onMotion)
+        click_cid  = fig.canvas.mpl_connect('button_press_event', self.onclick)
+
+        if self._standalone:
+            plt.show()
+        else:
+            while self.result is None:
+                if not plt.fignum_exists(fig.number):
+                    print("Warning: window closed without a click — sample skipped.")
+                    break
+                plt.pause(0.05)
+
+        fig.canvas.mpl_disconnect(motion_cid)
+        fig.canvas.mpl_disconnect(click_cid)
         return self.result
 
 
