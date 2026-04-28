@@ -26,8 +26,8 @@
           <div class="h5 mb-3">{{ annotated_count }}</div>
           <div class="text-secondary small">Epochs / Batch</div>
           <div class="mb-3">{{ cfg.num_epochs }} / {{ cfg.batch_size }}</div>
-          <form method="post">
-            <button class="btn btn-primary" type="submit">Run training</button>
+          <form method="post" id="train-form">
+            <button class="btn btn-primary" type="submit" id="train-btn">Run training</button>
           </form>
           <div class="form-text mt-2">
             Note: training runs in-process; for large datasets it can take a while.
@@ -48,5 +48,15 @@
       </div>
     </div>
   </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.getElementById('train-form').addEventListener('submit', function () {
+    const btn = document.getElementById('train-btn');
+    btn.disabled = true;
+    btn.textContent = 'Training…';
+  });
+</script>
 {% endblock %}
 

@@ -241,6 +241,7 @@ def train_and_predict(cfg: CnnConfig) -> dict:
 
     # Save sidecar metadata so predict_only can validate input compatibility.
     meta = {
+        "data_path": cfg.data_path,
         "max_len": max_len,
         "num_channels": len(channel_cols),
         "channel_cols": channel_cols,

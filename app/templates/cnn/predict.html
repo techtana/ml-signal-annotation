@@ -31,13 +31,8 @@
               {% endfor %}
             </select>
             <div class="form-text">
-              Choose an existing CSV under <code>data/</code>, or enter another path below.
+              Choose an existing CSV under <code>data/traces/</code>.
             </div>
-
-            <label class="form-label mt-3">Manual CSV path</label>
-            <input class="form-control" name="data_path_manual" id="data-path-manual"
-              value="{% if selected_data_path not in csv_options and selected_data_path != cfg.data_path %}{{ selected_data_path }}{% endif %}"
-              placeholder="e.g. data/traces.csv" />
 
             <div id="compat-badge" class="mt-2"></div>
 
@@ -155,6 +150,20 @@
   const DEFAULT_DATA_PATH = {{ cfg.data_path | tojson }};
 
   let modelMeta = null;
+  let isInitialLoad = true;
+
+  function setDataPath(path) {
+    const sel = document.getElementById('data-path-select');
+    const manual = document.getElementById('data-path-manual');
+    const opt = Array.from(sel.options).find(o => o.value === path);
+    if (opt) {
+      sel.value = path;
+      manual.value = '';
+    } else {
+      sel.value = '';
+      manual.value = path;
+    }
+  }
 
   function getDataPath() {
     const manual = (document.getElementById('data-path-manual').value || '').trim();
@@ -209,6 +218,10 @@
         if (meta.max_len)      parts.push(`${meta.max_len} steps`);
         if (meta.trim_ratio != null) parts.push(`trim ${meta.trim_ratio}`);
         setModelBadge(parts.length ? `Model expects: ${parts.join(' · ')}` : '');
+        if (!isInitialLoad && meta.data_path) {
+          setDataPath(meta.data_path);
+        }
+        isInitialLoad = false;
         checkCompat();
       })
       .catch(() => { setModelBadge(''); modelMeta = null; });
