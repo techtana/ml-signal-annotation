@@ -3,51 +3,48 @@
 {% block title %}Home · ML Annotation Tool{% endblock %}
 
 {% block content %}
-  <div class="row g-4 align-items-stretch">
-    <div class="col-12">
-      <div class="p-4 p-md-5 rounded-3 bg-body-tertiary border">
-        <div class="d-flex flex-column flex-md-row justify-content-between gap-3">
-          <div>
-            <h1 class="h3 mb-2">Annotation + CNN regressor</h1>
-            <p class="text-secondary mb-0">
-              Web UI for the same workflow in <code>train.py</code>: annotate → train → predict → view results.
-            </p>
-          </div>
-          <div class="d-flex gap-2 align-items-start">
-            <a class="btn btn-primary" href="{{ url_for('cnn.source') }}">Start annotating</a>
-            <a class="btn btn-outline-secondary" href="{{ url_for('cnn.settings') }}">Configure</a>
-          </div>
+  <div class="p-4 p-md-5 rounded-3 bg-body-tertiary border mb-4">
+    <div class="d-flex flex-column flex-md-row justify-content-between gap-3">
+      <div>
+        <h1 class="h3 mb-2">Annotation + CNN regressor</h1>
+        <p class="text-secondary mb-0">
+          Annotate multi-channel time-series samples, train a CNN, and run per-sample predictions.
+        </p>
+      </div>
+      <div class="d-flex gap-2 align-items-start">
+        <a class="btn btn-primary" href="{{ url_for('cnn.source') }}">Start annotating</a>
+        <a class="btn btn-outline-secondary" href="{{ url_for('cnn.settings') }}">Configure</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3">
+    <div class="col-sm-4">
+      <div class="card h-100">
+        <div class="card-body">
+          <h2 class="h6 card-title">1 · Annotate</h2>
+          <p class="card-text text-secondary small">Click on the Plotly chart to label the event position for each sample.</p>
+          <a class="btn btn-sm btn-outline-primary" href="{{ url_for('cnn.source') }}">Open</a>
         </div>
       </div>
     </div>
-
-    <div class="col-md-6">
+    <div class="col-sm-4">
       <div class="card h-100">
         <div class="card-body">
-          <h2 class="h5 card-title">Component 1</h2>
-          <p class="card-text text-secondary">
-            Interactive time-series annotation + CNN training and per-sample predictions.
-          </p>
-          <div class="d-flex gap-2">
-            <a class="btn btn-sm btn-outline-primary" href="{{ url_for('cnn.source') }}">Annotate</a>
-            <a class="btn btn-sm btn-outline-primary" href="{{ url_for('cnn.train') }}">Train</a>
-            <a class="btn btn-sm btn-outline-primary" href="{{ url_for('cnn.predict') }}">Predict</a>
-          </div>
+          <h2 class="h6 card-title">2 · Train</h2>
+          <p class="card-text text-secondary small">Train the CNN regressor and download the model to your browser.</p>
+          <a class="btn btn-sm btn-outline-primary" href="{{ url_for('cnn.train') }}">Open</a>
         </div>
       </div>
     </div>
-
-    <div class="col-md-6">
+    <div class="col-sm-4">
       <div class="card h-100">
         <div class="card-body">
-          <h2 class="h5 card-title">Component 2</h2>
-          <p class="card-text text-secondary">
-            Existing tabular regression pipeline job browser (from the original dashboard).
-          </p>
-          <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('pipeline.jobs') }}">View pipeline jobs</a>
+          <h2 class="h6 card-title">3 · Predict</h2>
+          <p class="card-text text-secondary small">Run inference using the stored model or a dropped <code>.keras</code> file.</p>
+          <a class="btn btn-sm btn-outline-primary" href="{{ url_for('cnn.predict') }}">Open</a>
         </div>
       </div>
     </div>
   </div>
 {% endblock %}
-

@@ -3,17 +3,15 @@
 {% block title %}Predict · CNN{% endblock %}
 
 {% block head %}
-  {% if predictions %}
-    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
-  {% endif %}
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
 {% endblock %}
 
 {% block content %}
-  <div class="d-flex flex-column flex-md-row justify-content-between align-items-start gap-3 mb-3">
+  <div class="d-flex justify-content-between align-items-start mb-3">
     <div>
       <h1 class="h4 mb-1">Predict</h1>
       <div class="text-secondary">
-        Loads a saved model and writes predictions to <code>{{ cfg.output_path }}</code>.
+        Load a model and run inference on a trace CSV. Predictions are written to <code>{{ cfg.output_path }}</code>.
       </div>
     </div>
   </div>
@@ -22,40 +20,47 @@
     <div class="col-lg-5">
       <div class="card">
         <div class="card-body">
-          <form method="post">
-            <label class="form-label">Prediction data CSV</label>
-            <select class="form-select" name="data_path" id="data-path-select">
-              <option value="">Use default: {{ cfg.data_path }}</option>
-              {% for path in csv_options %}
-                <option value="{{ path }}" {% if selected_data_path == path %}selected{% endif %}>{{ path }}</option>
-              {% endfor %}
-            </select>
-            <div class="form-text">
-              Choose an existing CSV under <code>data/traces/</code>.
-            </div>
 
-            <div id="compat-badge" class="mt-2"></div>
-
-            <label class="form-label mt-3">Model path</label>
-            <input class="form-control" name="model_path" id="model-path-input" value="{{ latest_model or '' }}" />
-            <div class="form-text">
-              Default = latest model under <code>{{ cfg.artifacts_dir }}</code>.
+          <!-- Model section -->
+          <label class="form-label fw-semibold">Model</label>
+          <div id="drop-zone"
+               class="border rounded p-3 text-center"
+               style="border-style:dashed !important; cursor:pointer; min-height:80px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px;">
+            <div class="text-secondary small">Drop a <code>.keras</code> file here</div>
+            <div class="text-secondary small">
+              or <span class="text-primary" style="cursor:pointer" id="browse-link">browse</span>
             </div>
-            <div id="model-info-badge" class="mt-1 text-secondary small"></div>
-            <button class="btn btn-primary mt-3" type="submit" {% if not latest_model %}disabled{% endif %}>
-              Run prediction
-            </button>
-          </form>
+            <input type="file" id="model-file-input" accept=".keras" class="d-none">
+          </div>
+
+          <div id="model-info" class="mt-2 small"></div>
+          <div id="compat-badge" class="mt-1"></div>
+          <div id="use-stored-wrap" class="mt-1 d-none">
+            <a href="#" id="use-stored-btn" class="small">&larr; Use trained model from browser</a>
+          </div>
+
+          <!-- Data CSV -->
+          <label class="form-label fw-semibold mt-3">Prediction data CSV</label>
+          <select class="form-select" id="data-path-select">
+            <option value="">Default: {{ cfg.data_path }}</option>
+            {% for path in csv_options %}
+              <option value="{{ path }}"
+                {% if selected_data_path == path %}selected{% endif %}>{{ path }}</option>
+            {% endfor %}
+          </select>
+
+          <button class="btn btn-primary mt-3" id="run-btn" disabled>Run prediction</button>
+          <div id="predict-error" class="alert alert-danger mt-2 d-none" role="alert"></div>
         </div>
       </div>
     </div>
 
     <div class="col-lg-7">
-      <div class="card mb-3">
+      <div class="card">
         <div class="card-body">
           <h2 class="h6">Expected CSV format</h2>
           <p class="text-secondary mb-2">
-            The prediction CSV should use the same time-series structure as training input.
+            The CSV must match the column structure used during training.
           </p>
           <p class="mb-3">
             <a class="btn btn-sm btn-outline-secondary"
@@ -75,220 +80,344 @@
 2,0.0,0.38,0.41,...</code></pre>
         </div>
       </div>
-
-      <div class="card">
-        <div class="card-body">
-          <h2 class="h6">Latest run</h2>
-          {% if summary %}
-            <pre class="mb-0"><code>{{ summary|tojson(indent=2) }}</code></pre>
-          {% else %}
-            <div class="text-secondary">No run yet.</div>
-          {% endif %}
-        </div>
-      </div>
     </div>
   </div>
 
-  {% if predictions %}
-  <div class="card">
+  <!-- Results (hidden until a prediction run completes) -->
+  <div class="card d-none" id="results-card">
     <div class="card-header d-flex justify-content-between align-items-center">
-      <span class="fw-semibold">Results — {{ predictions|length }} sample{{ 's' if predictions|length != 1 }}</span>
+      <span class="fw-semibold" id="results-header">Results</span>
       <div class="btn-group btn-group-sm" role="group">
-        <button class="btn btn-primary" id="btn-table" onclick="showView('table')">Table</button>
-        <button class="btn btn-outline-secondary" id="btn-plot" onclick="showView('plot')">Plot</button>
+        <button class="btn btn-primary btn-sm" id="btn-table">Table</button>
+        <button class="btn btn-outline-secondary btn-sm" id="btn-plot">Plot</button>
       </div>
     </div>
     <div class="card-body">
 
-      <!-- Table view (default) -->
       <div id="view-table">
-        <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
+        <div class="table-responsive" style="max-height:420px;overflow-y:auto;">
           <table class="table table-sm table-striped table-hover mb-0">
-            <thead class="sticky-top bg-white">
-              <tr>
-                <th>{{ cfg.group_by_col }}</th>
-                <th>Predicted position</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for row in predictions %}
-              <tr>
-                <td>{{ row[cfg.group_by_col] }}</td>
-                <td>{{ "%.4f" | format(row["predicted_position"]) }}</td>
-              </tr>
-              {% endfor %}
-            </tbody>
+            <thead class="sticky-top bg-white"><tr id="results-thead-row"></tr></thead>
+            <tbody id="results-tbody"></tbody>
           </table>
         </div>
       </div>
 
-      <!-- Plot view (hidden by default) -->
       <div id="view-plot" class="d-none">
-        <div class="d-flex align-items-center gap-2 mb-3">
-          <button class="btn btn-outline-secondary btn-sm" id="btn-prev" onclick="stepSample(-1)" disabled>&#8592; Prev</button>
-          <button class="btn btn-outline-secondary btn-sm" id="btn-next" onclick="stepSample(1)">Next &#8594;</button>
-          <select class="form-select form-select-sm" style="max-width: 320px" id="sample-select">
-            {% for row in predictions %}
-              <option value="{{ row[cfg.group_by_col] }}">{{ row[cfg.group_by_col] }}</option>
-            {% endfor %}
-          </select>
-          <span class="text-secondary text-nowrap small" id="sample-counter"></span>
+        <div class="d-flex align-items-center mb-3">
+          <div style="flex:1"></div>
+          <div class="d-flex align-items-center gap-2">
+            <select class="form-select form-select-sm" style="max-width:320px" id="sample-select"></select>
+            <span class="text-secondary text-nowrap small" id="sample-counter"></span>
+          </div>
+          <div style="flex:1" class="d-flex justify-content-end gap-2">
+            <button class="btn btn-outline-secondary btn-sm" id="btn-prev" disabled>&larr; Prev</button>
+            <button class="btn btn-outline-secondary btn-sm" id="btn-next">Next &rarr;</button>
+          </div>
         </div>
-        <div id="trace-plot" style="height: 420px"></div>
+        <div id="trace-plot" style="height:420px"></div>
       </div>
 
     </div>
   </div>
-  {% endif %}
 {% endblock %}
 
 {% block scripts %}
 <script>
 (function () {
-  const MODEL_INFO_URL = {{ url_for('cnn.predict_model_info') | tojson }};
-  const DATA_INFO_URL  = {{ url_for('cnn.predict_data_info')  | tojson }};
+  const PREDICT_RUN_URL   = {{ url_for('cnn.predict_run')    | tojson }};
+  const MODEL_META_URL    = {{ url_for('cnn.predict_model_meta') | tojson }};
+  const DATA_INFO_URL     = {{ url_for('cnn.predict_data_info')  | tojson }};
+  const SAMPLE_DATA_URL   = {{ url_for('cnn.predict_sample_data') | tojson }};
   const DEFAULT_DATA_PATH = {{ cfg.data_path | tojson }};
 
-  let modelMeta = null;
-  let isInitialLoad = true;
+  const DB_NAME    = 'ml_cnn_tool';
+  const DB_VERSION = 1;
+  const STORE_NAME = 'models';
 
-  function setDataPath(path) {
-    const sel = document.getElementById('data-path-select');
-    const opt = Array.from(sel.options).find(o => o.value === path);
-    if (opt) sel.value = path;
+  // ---- state ----
+  let activeModel  = null;   // { source:'memory'|'upload', binary:ArrayBuffer|null, file:File|null, meta:{}, label:string }
+  let memoryModel  = null;   // record from IndexedDB
+  let predictions  = [];
+  let groupByCol   = {{ cfg.group_by_col | tojson }};
+  let activeDataPath = '';
+  let currentIdx   = 0;
+  let plotReady    = false;
+
+  // ---- IndexedDB ----
+  function openDB() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = e => e.target.result.createObjectStore(STORE_NAME, { keyPath: 'id' });
+      req.onsuccess = e => resolve(e.target.result);
+      req.onerror = e => reject(e.target.error);
+    });
   }
+
+  function loadStoredModel() {
+    return openDB().then(db => new Promise((resolve, reject) => {
+      const req = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).get('latest');
+      req.onsuccess = e => resolve(e.target.result || null);
+      req.onerror = e => reject(e.target.error);
+    }));
+  }
+
+  // ---- UI helpers ----
+  function setModelInfo(html) { document.getElementById('model-info').innerHTML = html; }
+  function setCompatBadge(html) { document.getElementById('compat-badge').innerHTML = html; }
 
   function getDataPath() {
     return (document.getElementById('data-path-select').value || '').trim() || DEFAULT_DATA_PATH;
   }
 
-  function setModelBadge(html) {
-    document.getElementById('model-info-badge').innerHTML = html;
+  function updateRunBtn() {
+    document.getElementById('run-btn').disabled = !activeModel;
   }
 
-  function setCompatBadge(html) {
-    document.getElementById('compat-badge').innerHTML = html;
-  }
-
+  // ---- Compat check ----
   function checkCompat() {
-    if (!modelMeta || !modelMeta.num_channels) { setCompatBadge(''); return; }
-    const dataPath = getDataPath();
-    fetch(`${DATA_INFO_URL}?data_path=${encodeURIComponent(dataPath)}`)
+    const m = activeModel && activeModel.meta;
+    if (!m || !m.num_channels) { setCompatBadge(''); return; }
+
+    setCompatBadge('<span class="text-secondary small">Checking compatibility&hellip;</span>');
+    fetch(`${DATA_INFO_URL}?data_path=${encodeURIComponent(getDataPath())}`)
       .then(r => r.json())
       .then(info => {
         if (info.error) {
-          setCompatBadge(`<span class="badge bg-warning text-dark">⚠ ${info.error}</span>`);
+          setCompatBadge(`<span class="badge bg-warning text-dark">&#9888; ${info.error}</span>`);
           return;
         }
-        const chOk = info.num_channels === modelMeta.num_channels;
-        const colsOk = !modelMeta.channel_cols || modelMeta.channel_cols.length === 0 ||
-          JSON.stringify([...info.channel_cols].sort()) === JSON.stringify([...modelMeta.channel_cols].sort());
+        const chOk = info.num_channels === m.num_channels;
+        const colsOk = !m.channel_cols || m.channel_cols.length === 0 ||
+          JSON.stringify([...info.channel_cols].sort()) ===
+          JSON.stringify([...m.channel_cols].sort());
+
         if (chOk && colsOk) {
-          setCompatBadge('<span class="badge bg-success">✓ Compatible with model</span>');
+          setCompatBadge('<span class="badge bg-success">&#10003; Compatible</span>');
         } else if (!chOk) {
-          setCompatBadge(`<span class="badge bg-warning text-dark">⚠ Channel mismatch: data has ${info.num_channels} ch, model expects ${modelMeta.num_channels}</span>`);
+          setCompatBadge(
+            `<span class="badge bg-danger">&#10007; Channel mismatch &mdash; ` +
+            `data: ${info.num_channels} ch, model expects: ${m.num_channels} ch</span>`
+          );
         } else {
-          const got = info.channel_cols.join(', ');
-          const exp = modelMeta.channel_cols.join(', ');
-          setCompatBadge(`<span class="badge bg-warning text-dark">⚠ Column mismatch — data: [${got}] · model: [${exp}]</span>`);
+          setCompatBadge(
+            `<span class="badge bg-warning text-dark">&#9888; Column mismatch &mdash; ` +
+            `data: [${info.channel_cols.join(', ')}] &middot; model: [${m.channel_cols.join(', ')}]</span>`
+          );
         }
       })
       .catch(() => setCompatBadge(''));
   }
 
-  function loadModelInfo() {
-    const mp = (document.getElementById('model-path-input').value || '').trim();
-    if (!mp) { setModelBadge(''); modelMeta = null; setCompatBadge(''); return; }
-    fetch(`${MODEL_INFO_URL}?model_path=${encodeURIComponent(mp)}`)
+  // ---- Set active model ----
+  function setActiveModel(model) {
+    activeModel = model;
+
+    if (!model) {
+      setModelInfo('<span class="text-warning small">No model loaded. Drop a .keras file or train first.</span>');
+      setCompatBadge('');
+      document.getElementById('use-stored-wrap').classList.add('d-none');
+      updateRunBtn();
+      return;
+    }
+
+    const m = model.meta || {};
+    const parts = [];
+    if (m.num_channels) parts.push(`${m.num_channels} ch`);
+    if (m.max_len)      parts.push(`${m.max_len} steps`);
+    if (m.trim_ratio != null) parts.push(`trim ${m.trim_ratio}`);
+    const detail = parts.length ? ` <span class="text-muted">&middot; ${parts.join(' &middot; ')}</span>` : '';
+
+    const prefix = model.source === 'memory' ? '[browser] ' : '[file] ';
+    setModelInfo(`<strong>${prefix}${model.label}</strong>${detail}`);
+
+    // show "use stored" link only when a memory model exists and upload is active
+    const wrap = document.getElementById('use-stored-wrap');
+    wrap.classList.toggle('d-none', model.source === 'memory' || !memoryModel);
+
+    updateRunBtn();
+    checkCompat();
+  }
+
+  // ---- Drop zone / file browse ----
+  const dropZone = document.getElementById('drop-zone');
+  const fileInput = document.getElementById('model-file-input');
+
+  document.getElementById('browse-link').addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('click', e => {
+    if (e.target !== document.getElementById('browse-link')) fileInput.click();
+  });
+  dropZone.addEventListener('dragover', e => {
+    e.preventDefault();
+    dropZone.classList.add('bg-light');
+  });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('bg-light'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('bg-light');
+    handleFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener('change', e => handleFile(e.target.files[0]));
+
+  function handleFile(file) {
+    if (!file) return;
+    if (!file.name.endsWith('.keras')) {
+      setModelInfo('<span class="text-danger small">Please drop a .keras file.</span>');
+      return;
+    }
+    setModelInfo('<span class="text-secondary small">Reading model&hellip;</span>');
+    setCompatBadge('');
+
+    const fd = new FormData();
+    fd.append('model_file', file);
+    fetch(MODEL_META_URL, { method: 'POST', body: fd })
       .then(r => r.json())
       .then(meta => {
-        if (meta.error) { setModelBadge(`<span class="text-warning">${meta.error}</span>`); modelMeta = null; setCompatBadge(''); return; }
-        modelMeta = meta;
-        const parts = [];
-        if (meta.num_channels) parts.push(`${meta.num_channels} ch`);
-        if (meta.max_len)      parts.push(`${meta.max_len} steps`);
-        if (meta.trim_ratio != null) parts.push(`trim ${meta.trim_ratio}`);
-        setModelBadge(parts.length ? `Model expects: ${parts.join(' · ')}` : '');
-        if (!isInitialLoad && meta.data_path) {
-          setDataPath(meta.data_path);
+        if (meta.error) {
+          setModelInfo(`<span class="text-danger small">Error: ${meta.error}</span>`);
+          return;
         }
-        isInitialLoad = false;
-        checkCompat();
+        setActiveModel({ source: 'upload', file, binary: null, meta, label: file.name });
       })
-      .catch(() => { setModelBadge(''); modelMeta = null; });
+      .catch(err => setModelInfo(`<span class="text-danger small">Error: ${err.message}</span>`));
   }
 
-  document.getElementById('model-path-input').addEventListener('change', loadModelInfo);
+  // "Use stored model" link
+  document.getElementById('use-stored-btn').addEventListener('click', e => {
+    e.preventDefault();
+    if (memoryModel) {
+      setActiveModel({
+        source: 'memory',
+        binary: memoryModel.binary,
+        file: null,
+        meta: memoryModel.meta || {},
+        label: `Trained model (${new Date(memoryModel.timestamp).toLocaleString()})`,
+      });
+    }
+  });
+
   document.getElementById('data-path-select').addEventListener('change', checkCompat);
 
-  // Run on page load
-  loadModelInfo();
-})();
-</script>
+  // ---- Run prediction ----
+  document.getElementById('run-btn').addEventListener('click', async function () {
+    if (!activeModel) return;
 
-{% if predictions %}
-<script>
-  const DATA_PATH = {{ selected_data_path | tojson }};
-  const SAMPLE_DATA_URL = {{ url_for('cnn.predict_sample_data') | tojson }};
+    const btn = this;
+    const errEl = document.getElementById('predict-error');
+    btn.disabled = true;
+    btn.textContent = 'Running…';
+    errEl.classList.add('d-none');
 
-  const keys = {{ predictions | map(attribute=cfg.group_by_col) | list | tojson }};
-  let currentIdx = 0;
-  let plotInitialized = false;
+    try {
+      let binary;
+      if (activeModel.source === 'upload' && activeModel.file) {
+        binary = await activeModel.file.arrayBuffer();
+      } else if (activeModel.binary) {
+        binary = activeModel.binary;
+      } else {
+        throw new Error('No model binary available.');
+      }
 
-  function syncControls() {
-    const sel = document.getElementById('sample-select');
-    sel.value = keys[currentIdx];
-    document.getElementById('btn-prev').disabled = currentIdx === 0;
-    document.getElementById('btn-next').disabled = currentIdx === keys.length - 1;
-    document.getElementById('sample-counter').textContent = `${currentIdx + 1} / ${keys.length}`;
+      const fd = new FormData();
+      fd.append('model_file', new Blob([binary], { type: 'application/octet-stream' }), 'model.keras');
+      fd.append('data_path', getDataPath());
+
+      const r    = await fetch(PREDICT_RUN_URL, { method: 'POST', body: fd });
+      const data = await r.json();
+
+      btn.disabled = false;
+      btn.textContent = 'Run prediction';
+
+      if (!data.ok) {
+        errEl.textContent = 'Prediction failed: ' + data.error;
+        errEl.classList.remove('d-none');
+        return;
+      }
+
+      predictions    = data.predictions || [];
+      groupByCol     = data.group_by_col || groupByCol;
+      activeDataPath = data.data_path || getDataPath();
+      plotReady      = false;
+      renderResults();
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = 'Run prediction';
+      errEl.textContent = 'Prediction failed: ' + err.message;
+      errEl.classList.remove('d-none');
+    }
+  });
+
+  // ---- Results ----
+  function renderResults() {
+    if (!predictions.length) return;
+
+    document.getElementById('results-thead-row').innerHTML =
+      `<th>${groupByCol}</th><th>Predicted position</th>`;
+
+    document.getElementById('results-tbody').innerHTML = predictions
+      .map(r => `<tr><td>${r[groupByCol]}</td><td>${parseFloat(r.predicted_position).toFixed(4)}</td></tr>`)
+      .join('');
+
+    document.getElementById('sample-select').innerHTML = predictions
+      .map(r => `<option value="${r[groupByCol]}">${r[groupByCol]}</option>`)
+      .join('');
+
+    document.getElementById('results-header').textContent =
+      `Results — ${predictions.length} sample${predictions.length !== 1 ? 's' : ''}`;
+
+    document.getElementById('results-card').classList.remove('d-none');
+    showView('table');
   }
 
+  // ---- Plot view ----
   function showView(view) {
     const isTable = view === 'table';
     document.getElementById('view-table').classList.toggle('d-none', !isTable);
     document.getElementById('view-plot').classList.toggle('d-none', isTable);
     document.getElementById('btn-table').className = 'btn btn-sm ' + (isTable ? 'btn-primary' : 'btn-outline-secondary');
     document.getElementById('btn-plot').className  = 'btn btn-sm ' + (!isTable ? 'btn-primary' : 'btn-outline-secondary');
-    if (!isTable && !plotInitialized) {
+    if (!isTable && !plotReady) {
       syncControls();
-      loadTrace(keys[currentIdx]);
+      loadTrace(predictions[currentIdx][groupByCol]);
     }
+  }
+
+  function syncControls() {
+    const keys = predictions.map(r => String(r[groupByCol]));
+    document.getElementById('sample-select').value = keys[currentIdx];
+    document.getElementById('btn-prev').disabled = currentIdx === 0;
+    document.getElementById('btn-next').disabled = currentIdx === keys.length - 1;
+    document.getElementById('sample-counter').textContent = `${currentIdx + 1} / ${keys.length}`;
   }
 
   function stepSample(delta) {
     const next = currentIdx + delta;
-    if (next < 0 || next >= keys.length) return;
+    if (next < 0 || next >= predictions.length) return;
     currentIdx = next;
     syncControls();
-    loadTrace(keys[currentIdx]);
+    loadTrace(predictions[currentIdx][groupByCol]);
   }
 
   function loadTrace(key) {
-    const url = `${SAMPLE_DATA_URL}?key=${encodeURIComponent(key)}&data_path=${encodeURIComponent(DATA_PATH)}`;
+    const dp  = activeDataPath || DEFAULT_DATA_PATH;
+    const url = `${SAMPLE_DATA_URL}?key=${encodeURIComponent(key)}&data_path=${encodeURIComponent(dp)}`;
     fetch(url)
       .then(r => r.json())
       .then(data => {
-        if (data.error) { alert(data.error); return; }
-        plotInitialized = true;
+        if (data.error) { console.error(data.error); return; }
+        plotReady = true;
 
         const traces = data.series.map(s => ({
-          x: data.x,
-          y: s.y,
-          name: s.name,
-          type: 'scatter',
-          mode: 'lines',
-          line: { width: 1.5 }
+          x: data.x, y: s.y, name: s.name, type: 'scatter', mode: 'lines',
+          line: { width: 1.5 },
         }));
-
-        const shapes = [];
-        const annotations = [];
+        const shapes = [], annotations = [];
         if (data.predicted_position !== null) {
           shapes.push({
             type: 'line',
             x0: data.predicted_position, x1: data.predicted_position,
-            y0: 0, y1: 1,
-            xref: 'x', yref: 'paper',
-            line: { color: '#0d6efd', width: 2, dash: 'dash' }
+            y0: 0, y1: 1, xref: 'x', yref: 'paper',
+            line: { color: '#0d6efd', width: 2, dash: 'dash' },
           });
           annotations.push({
             x: data.predicted_position, y: 0.98,
@@ -297,28 +426,48 @@
             showarrow: false,
             font: { color: '#0d6efd', size: 11 },
             xanchor: 'left', yanchor: 'top',
-            bgcolor: 'rgba(255,255,255,0.7)',
-            borderpad: 2
+            bgcolor: 'rgba(255,255,255,0.7)', borderpad: 2,
           });
         }
-
         Plotly.react('trace-plot', traces, {
           margin: { t: 16, r: 16, b: 40, l: 50 },
-          showlegend: true,
-          legend: { orientation: 'h' },
+          showlegend: true, legend: { orientation: 'h' },
           xaxis: { title: 'Time' },
           yaxis: { title: 'Normalized value', range: [-0.05, 1.05] },
-          shapes,
-          annotations
+          shapes, annotations,
         }, { responsive: true });
       });
   }
 
+  document.getElementById('btn-table').addEventListener('click', () => showView('table'));
+  document.getElementById('btn-plot').addEventListener('click',  () => showView('plot'));
+  document.getElementById('btn-prev').addEventListener('click',  () => stepSample(-1));
+  document.getElementById('btn-next').addEventListener('click',  () => stepSample(1));
+
   document.getElementById('sample-select').addEventListener('change', e => {
-    currentIdx = keys.indexOf(e.target.value);
+    currentIdx = predictions.findIndex(r => String(r[groupByCol]) === e.target.value);
+    if (currentIdx < 0) currentIdx = 0;
     syncControls();
-    loadTrace(keys[currentIdx]);
+    loadTrace(predictions[currentIdx][groupByCol]);
   });
+
+  // ---- Page load: read model from IndexedDB ----
+  loadStoredModel()
+    .then(stored => {
+      memoryModel = stored;
+      if (stored) {
+        setActiveModel({
+          source: 'memory',
+          binary: stored.binary,
+          file: null,
+          meta: stored.meta || {},
+          label: `Trained model (${new Date(stored.timestamp).toLocaleString()})`,
+        });
+      } else {
+        setActiveModel(null);
+      }
+    })
+    .catch(() => setActiveModel(null));
+})();
 </script>
-{% endif %}
 {% endblock %}
