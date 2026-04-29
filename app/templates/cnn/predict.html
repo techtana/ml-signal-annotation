@@ -3,6 +3,7 @@
 {% block title %}Predict · CNN{% endblock %}
 
 {% block head %}
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
   <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
 {% endblock %}
 
@@ -10,9 +11,7 @@
   <div class="d-flex justify-content-between align-items-start mb-3">
     <div>
       <h1 class="h4 mb-1">Predict</h1>
-      <div class="text-secondary">
-        Load a model and run inference on a trace CSV. Predictions are written to <code>{{ cfg.output_path }}</code>.
-      </div>
+      <div class="text-secondary">Run inference in your browser using TensorFlow.js.</div>
     </div>
   </div>
 
@@ -23,21 +22,30 @@
 
           <!-- Model section -->
           <label class="form-label fw-semibold">Model</label>
-          <div id="drop-zone"
-               class="border rounded p-3 text-center"
-               style="border-style:dashed !important; cursor:pointer; min-height:80px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px;">
-            <div class="text-secondary small">Drop a <code>.keras</code> file here</div>
-            <div class="text-secondary small">
-              or <span class="text-primary" style="cursor:pointer" id="browse-link">browse</span>
+
+          <div id="model-stored-row" class="d-none mb-2">
+            <div class="d-flex align-items-center gap-2">
+              <span class="badge bg-secondary" id="model-stored-badge">Browser model</span>
+              <span class="text-secondary small" id="model-stored-detail"></span>
+              <a href="#" id="clear-model-btn" class="small ms-auto text-danger">Clear</a>
             </div>
-            <input type="file" id="model-file-input" accept=".keras" class="d-none">
           </div>
 
-          <div id="model-info" class="mt-2 small"></div>
-          <div id="compat-badge" class="mt-1"></div>
-          <div id="use-stored-wrap" class="mt-1 d-none">
-            <a href="#" id="use-stored-btn" class="small">&larr; Use trained model from browser</a>
+          <!-- Drop zone for TF.js model files -->
+          <div id="drop-zone"
+               class="border rounded p-3 text-center"
+               style="border-style:dashed !important; cursor:pointer; min-height:72px;
+                      display:flex; flex-direction:column; align-items:center;
+                      justify-content:center; gap:2px;">
+            <div class="text-secondary small">Drop <code>model.json</code> + <code>model.weights.bin</code></div>
+            <div class="text-secondary small">
+              or <span class="text-primary" id="browse-link" style="cursor:pointer">browse</span>
+            </div>
+            <input type="file" id="model-file-input" accept=".json,.bin" multiple class="d-none">
           </div>
+
+          <div id="model-info"   class="mt-2 small"></div>
+          <div id="compat-badge" class="mt-1"></div>
 
           <!-- Data CSV -->
           <label class="form-label fw-semibold mt-3">Prediction data CSV</label>
@@ -59,9 +67,7 @@
       <div class="card">
         <div class="card-body">
           <h2 class="h6">Expected CSV format</h2>
-          <p class="text-secondary mb-2">
-            The CSV must match the column structure used during training.
-          </p>
+          <p class="text-secondary mb-2">The CSV must match the column structure used during training.</p>
           <p class="mb-3">
             <a class="btn btn-sm btn-outline-secondary"
                href="{{ url_for('static', filename='prediction_template.csv') }}" download>
@@ -76,26 +82,28 @@
           </ul>
           <pre class="mb-0"><code>{{ cfg.group_by_col }},{{ cfg.time_index_col }},channel_1,channel_2,...
 1,0.0,0.44,0.49,...
-1,0.5,0.46,0.51,...
 2,0.0,0.38,0.41,...</code></pre>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Results (hidden until a prediction run completes) -->
+  <!-- Results -->
   <div class="card d-none" id="results-card">
     <div class="card-header d-flex justify-content-between align-items-center">
       <span class="fw-semibold" id="results-header">Results</span>
-      <div class="btn-group btn-group-sm" role="group">
-        <button class="btn btn-primary btn-sm" id="btn-table">Table</button>
-        <button class="btn btn-outline-secondary btn-sm" id="btn-plot">Plot</button>
+      <div class="d-flex align-items-center gap-2">
+        <button class="btn btn-sm btn-outline-secondary" id="dl-csv-btn">Download CSV</button>
+        <div class="btn-group btn-group-sm" role="group">
+          <button class="btn btn-primary btn-sm"         id="btn-table">Table</button>
+          <button class="btn btn-outline-secondary btn-sm" id="btn-plot">Plot</button>
+        </div>
       </div>
     </div>
     <div class="card-body">
 
       <div id="view-table">
-        <div class="table-responsive" style="max-height:420px;overflow-y:auto;">
+        <div class="table-responsive" style="max-height:420px; overflow-y:auto;">
           <table class="table table-sm table-striped table-hover mb-0">
             <thead class="sticky-top bg-white"><tr id="results-thead-row"></tr></thead>
             <tbody id="results-tbody"></tbody>
@@ -125,269 +133,283 @@
 {% block scripts %}
 <script>
 (function () {
-  const PREDICT_RUN_URL   = {{ url_for('cnn.predict_run')    | tojson }};
-  const MODEL_META_URL    = {{ url_for('cnn.predict_model_meta') | tojson }};
-  const DATA_INFO_URL     = {{ url_for('cnn.predict_data_info')  | tojson }};
-  const SAMPLE_DATA_URL   = {{ url_for('cnn.predict_sample_data') | tojson }};
+  const TRACE_DATA_URL    = {{ url_for('cnn.trace_data') | tojson }};
   const DEFAULT_DATA_PATH = {{ cfg.data_path | tojson }};
+  const META_KEY          = 'cnn-model-meta';
+  const IDB_MODEL         = 'indexeddb://cnn-latest';
 
-  const DB_NAME    = 'ml_cnn_tool';
-  const DB_VERSION = 1;
-  const STORE_NAME = 'models';
+  // ── State ─────────────────────────────────────────────────────────────────
+  let activeModel    = null;   // tf.LayersModel
+  let modelMeta      = null;   // from localStorage or uploaded model.json
+  let traceData      = null;   // { samples, channel_cols, max_len, annotations, group_by_col }
+  let processedCache = {};     // key → preprocessed [maxLen, nCh] array
+  let predictions    = [];     // [{key, predicted_position}]
+  let groupByCol     = {{ cfg.group_by_col | tojson }};
+  let currentIdx     = 0;
+  let plotReady      = false;
 
-  // ---- state ----
-  let activeModel  = null;   // { source:'memory'|'upload', binary:ArrayBuffer|null, file:File|null, meta:{}, label:string }
-  let memoryModel  = null;   // record from IndexedDB
-  let predictions  = [];
-  let groupByCol   = {{ cfg.group_by_col | tojson }};
-  let activeDataPath = '';
-  let currentIdx   = 0;
-  let plotReady    = false;
+  // ── Preprocessing (mirrors Python pipeline) ───────────────────────────────
 
-  // ---- IndexedDB ----
-  function openDB() {
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, DB_VERSION);
-      req.onupgradeneeded = e => e.target.result.createObjectStore(STORE_NAME, { keyPath: 'id' });
-      req.onsuccess = e => resolve(e.target.result);
-      req.onerror = e => reject(e.target.error);
-    });
+  function minMaxNormalize(channels) {
+    const nCh = channels[0].length;
+    const mins = Array(nCh).fill(Infinity);
+    const maxs = Array(nCh).fill(-Infinity);
+    for (const row of channels) {
+      for (let c = 0; c < nCh; c++) {
+        if (row[c] < mins[c]) mins[c] = row[c];
+        if (row[c] > maxs[c]) maxs[c] = row[c];
+      }
+    }
+    return channels.map(row =>
+      row.map((v, c) => { const r = maxs[c] - mins[c]; return r === 0 ? 0 : (v - mins[c]) / r; })
+    );
   }
 
-  function loadStoredModel() {
-    return openDB().then(db => new Promise((resolve, reject) => {
-      const req = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).get('latest');
-      req.onsuccess = e => resolve(e.target.result || null);
-      req.onerror = e => reject(e.target.error);
-    }));
+  function trimAndPad(channels, trimRatio, maxLen) {
+    const n = channels.length;
+    const trim = Math.floor(n * trimRatio);
+    let sliced = channels.slice(trim, n - trim || n);
+    if (!sliced.length) throw new Error('All rows trimmed');
+    const normed = minMaxNormalize(sliced);
+    const last = normed[normed.length - 1];
+    while (normed.length < maxLen) normed.push([...last]);
+    return normed;
   }
 
-  // ---- UI helpers ----
-  function setModelInfo(html) { document.getElementById('model-info').innerHTML = html; }
-  function setCompatBadge(html) { document.getElementById('compat-badge').innerHTML = html; }
+  // ── UI helpers ────────────────────────────────────────────────────────────
+
+  function setModelInfo(html)  { document.getElementById('model-info').innerHTML   = html; }
+  function setCompatBadge(html){ document.getElementById('compat-badge').innerHTML = html; }
 
   function getDataPath() {
     return (document.getElementById('data-path-select').value || '').trim() || DEFAULT_DATA_PATH;
   }
 
   function updateRunBtn() {
-    document.getElementById('run-btn').disabled = !activeModel;
+    document.getElementById('run-btn').disabled = !(activeModel && traceData);
   }
 
-  // ---- Compat check ----
+  // ── Compat check ──────────────────────────────────────────────────────────
+
   function checkCompat() {
-    const m = activeModel && activeModel.meta;
-    if (!m || !m.num_channels) { setCompatBadge(''); return; }
-
-    setCompatBadge('<span class="text-secondary small">Checking compatibility&hellip;</span>');
-    fetch(`${DATA_INFO_URL}?data_path=${encodeURIComponent(getDataPath())}`)
-      .then(r => r.json())
-      .then(info => {
-        if (info.error) {
-          setCompatBadge(`<span class="badge bg-warning text-dark">&#9888; ${info.error}</span>`);
-          return;
-        }
-        const chOk = info.num_channels === m.num_channels;
-        const colsOk = !m.channel_cols || m.channel_cols.length === 0 ||
-          JSON.stringify([...info.channel_cols].sort()) ===
-          JSON.stringify([...m.channel_cols].sort());
-
-        if (chOk && colsOk) {
-          setCompatBadge('<span class="badge bg-success">&#10003; Compatible</span>');
-        } else if (!chOk) {
-          setCompatBadge(
-            `<span class="badge bg-danger">&#10007; Channel mismatch &mdash; ` +
-            `data: ${info.num_channels} ch, model expects: ${m.num_channels} ch</span>`
-          );
-        } else {
-          setCompatBadge(
-            `<span class="badge bg-warning text-dark">&#9888; Column mismatch &mdash; ` +
-            `data: [${info.channel_cols.join(', ')}] &middot; model: [${m.channel_cols.join(', ')}]</span>`
-          );
-        }
-      })
-      .catch(() => setCompatBadge(''));
+    if (!modelMeta || !traceData) { setCompatBadge(''); return; }
+    const mCh   = modelMeta.nChannels;
+    const mCols = modelMeta.channelCols || [];
+    const dCh   = traceData.channel_cols.length;
+    const dCols = traceData.channel_cols;
+    const chOk  = mCh === dCh;
+    const colsOk = !mCols.length ||
+      JSON.stringify([...dCols].sort()) === JSON.stringify([...mCols].sort());
+    if (chOk && colsOk)
+      setCompatBadge('<span class="badge bg-success">&#10003; Compatible</span>');
+    else if (!chOk)
+      setCompatBadge(`<span class="badge bg-danger">&#10007; Channel mismatch — data: ${dCh} ch, model: ${mCh} ch</span>`);
+    else
+      setCompatBadge(`<span class="badge bg-warning text-dark">&#9888; Column mismatch — data: [${dCols.join(', ')}] &middot; model: [${mCols.join(', ')}]</span>`);
   }
 
-  // ---- Set active model ----
-  function setActiveModel(model) {
-    activeModel = model;
+  // ── Load trace data ───────────────────────────────────────────────────────
 
-    if (!model) {
-      setModelInfo('<span class="text-warning small">No model loaded. Drop a .keras file or train first.</span>');
-      setCompatBadge('');
-      document.getElementById('use-stored-wrap').classList.add('d-none');
-      updateRunBtn();
-      return;
-    }
-
-    const m = model.meta || {};
-    const parts = [];
-    if (m.num_channels) parts.push(`${m.num_channels} ch`);
-    if (m.max_len)      parts.push(`${m.max_len} steps`);
-    if (m.trim_ratio != null) parts.push(`trim ${m.trim_ratio}`);
-    const detail = parts.length ? ` <span class="text-muted">&middot; ${parts.join(' &middot; ')}</span>` : '';
-
-    const prefix = model.source === 'memory' ? '[browser] ' : '[file] ';
-    setModelInfo(`<strong>${prefix}${model.label}</strong>${detail}`);
-
-    // show "use stored" link only when a memory model exists and upload is active
-    const wrap = document.getElementById('use-stored-wrap');
-    wrap.classList.toggle('d-none', model.source === 'memory' || !memoryModel);
-
-    updateRunBtn();
+  async function loadTraceData(path) {
+    const r = await fetch(`${TRACE_DATA_URL}?path=${encodeURIComponent(path)}`);
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    traceData    = d;
+    groupByCol   = d.group_by_col || groupByCol;
+    processedCache = {};
     checkCompat();
+    updateRunBtn();
   }
 
-  // ---- Drop zone / file browse ----
-  const dropZone = document.getElementById('drop-zone');
+  document.getElementById('data-path-select').addEventListener('change', async () => {
+    try {
+      await loadTraceData(getDataPath());
+    } catch (e) {
+      setCompatBadge(`<span class="badge bg-warning text-dark">&#9888; ${e.message}</span>`);
+    }
+  });
+
+  // ── Model load helpers ────────────────────────────────────────────────────
+
+  async function setModel(model, meta) {
+    if (activeModel) activeModel.dispose();
+    activeModel = model;
+    modelMeta   = meta;
+    if (!meta) { setModelInfo('<span class="text-warning small">No model loaded.</span>'); updateRunBtn(); return; }
+
+    const parts = [];
+    if (meta.nChannels) parts.push(`${meta.nChannels} ch`);
+    if (meta.maxLen)    parts.push(`${meta.maxLen} steps`);
+    if (meta.trimRatio != null) parts.push(`trim ${meta.trimRatio}`);
+    setModelInfo(`<strong>${meta._source || 'Model'}</strong>` +
+      (parts.length ? ` <span class="text-muted">&middot; ${parts.join(' &middot; ')}</span>` : ''));
+    checkCompat();
+    updateRunBtn();
+  }
+
+  // ── Load from IndexedDB (TF.js native) ───────────────────────────────────
+
+  async function loadFromIDB() {
+    try {
+      const model = await tf.loadLayersModel(IDB_MODEL);
+      const stored = JSON.parse(localStorage.getItem(META_KEY) || 'null');
+      const meta = stored ? { ...stored, _source: `Browser model (${new Date(stored.trainedAt).toLocaleString()})` } : null;
+      await setModel(model, meta);
+      document.getElementById('model-stored-row').classList.remove('d-none');
+      document.getElementById('model-stored-badge').textContent = 'Browser model';
+      if (stored) {
+        document.getElementById('model-stored-detail').textContent =
+          new Date(stored.trainedAt).toLocaleString();
+      }
+    } catch {
+      // No model in IndexedDB yet — that's fine
+    }
+  }
+
+  document.getElementById('clear-model-btn').addEventListener('click', async e => {
+    e.preventDefault();
+    try { await tf.io.removeModel(IDB_MODEL); } catch {}
+    localStorage.removeItem(META_KEY);
+    if (activeModel) { activeModel.dispose(); activeModel = null; }
+    modelMeta = null;
+    document.getElementById('model-stored-row').classList.add('d-none');
+    setModelInfo('<span class="text-secondary small">Model cleared.</span>');
+    setCompatBadge('');
+    updateRunBtn();
+  });
+
+  // ── Drop zone / browse (TF.js model.json + model.weights.bin) ────────────
+
+  const dropZone  = document.getElementById('drop-zone');
   const fileInput = document.getElementById('model-file-input');
 
   document.getElementById('browse-link').addEventListener('click', () => fileInput.click());
-  dropZone.addEventListener('click', e => {
-    if (e.target !== document.getElementById('browse-link')) fileInput.click();
-  });
-  dropZone.addEventListener('dragover', e => {
-    e.preventDefault();
-    dropZone.classList.add('bg-light');
-  });
+  dropZone.addEventListener('click', e => { if (e.target.id !== 'browse-link') fileInput.click(); });
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('bg-light'); });
   dropZone.addEventListener('dragleave', () => dropZone.classList.remove('bg-light'));
-  dropZone.addEventListener('drop', e => {
-    e.preventDefault();
-    dropZone.classList.remove('bg-light');
-    handleFile(e.dataTransfer.files[0]);
-  });
-  fileInput.addEventListener('change', e => handleFile(e.target.files[0]));
+  dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('bg-light'); handleFiles(e.dataTransfer.files); });
+  fileInput.addEventListener('change', e => handleFiles(e.target.files));
 
-  function handleFile(file) {
-    if (!file) return;
-    if (!file.name.endsWith('.keras')) {
-      setModelInfo('<span class="text-danger small">Please drop a .keras file.</span>');
-      return;
+  async function handleFiles(fileList) {
+    const files   = Array.from(fileList);
+    const jsonFile = files.find(f => f.name.endsWith('.json'));
+    const binFiles = files.filter(f => f.name.endsWith('.bin'));
+    if (!jsonFile) { setModelInfo('<span class="text-danger small">Select the model.json file (and .bin weights).</span>'); return; }
+
+    setModelInfo('<span class="text-secondary small">Loading uploaded model&hellip;</span>');
+    try {
+      const model  = await tf.loadLayersModel(tf.io.browserFiles([jsonFile, ...binFiles]));
+      const shape  = model.inputs[0].shape; // [null, maxLen, nChannels, 1]
+      const meta   = { maxLen: shape[1], nChannels: shape[2], channelCols: [], trimRatio: null,
+                       _source: `Uploaded: ${jsonFile.name}` };
+      await setModel(model, meta);
+      document.getElementById('model-stored-row').classList.add('d-none');
+    } catch (e) {
+      setModelInfo(`<span class="text-danger small">Error: ${e.message}</span>`);
     }
-    setModelInfo('<span class="text-secondary small">Reading model&hellip;</span>');
-    setCompatBadge('');
-
-    const fd = new FormData();
-    fd.append('model_file', file);
-    fetch(MODEL_META_URL, { method: 'POST', body: fd })
-      .then(r => r.json())
-      .then(meta => {
-        if (meta.error) {
-          setModelInfo(`<span class="text-danger small">Error: ${meta.error}</span>`);
-          return;
-        }
-        setActiveModel({ source: 'upload', file, binary: null, meta, label: file.name });
-      })
-      .catch(err => setModelInfo(`<span class="text-danger small">Error: ${err.message}</span>`));
   }
 
-  // "Use stored model" link
-  document.getElementById('use-stored-btn').addEventListener('click', e => {
-    e.preventDefault();
-    if (memoryModel) {
-      setActiveModel({
-        source: 'memory',
-        binary: memoryModel.binary,
-        file: null,
-        meta: memoryModel.meta || {},
-        label: `Trained model (${new Date(memoryModel.timestamp).toLocaleString()})`,
-      });
-    }
-  });
+  // ── Run prediction ────────────────────────────────────────────────────────
 
-  document.getElementById('data-path-select').addEventListener('change', checkCompat);
-
-  // ---- Run prediction ----
   document.getElementById('run-btn').addEventListener('click', async function () {
-    if (!activeModel) return;
-
-    const btn = this;
+    if (!activeModel || !traceData) return;
+    const btn   = this;
     const errEl = document.getElementById('predict-error');
     btn.disabled = true;
     btn.textContent = 'Running…';
     errEl.classList.add('d-none');
 
     try {
-      let binary;
-      if (activeModel.source === 'upload' && activeModel.file) {
-        binary = await activeModel.file.arrayBuffer();
-      } else if (activeModel.binary) {
-        binary = activeModel.binary;
-      } else {
-        throw new Error('No model binary available.');
+      const shape    = activeModel.inputs[0].shape; // [null, maxLen, nCh, 1]
+      const maxLen   = shape[1];
+      const nChannels = shape[2];
+      const trimRatio = (modelMeta && modelMeta.trimRatio != null) ? modelMeta.trimRatio : 0.1;
+      const keys     = Object.keys(traceData.samples);
+
+      // Preprocess
+      for (const k of keys) {
+        if (!processedCache[k]) {
+          processedCache[k] = trimAndPad(traceData.samples[k].channels, trimRatio, maxLen);
+        }
       }
 
-      const fd = new FormData();
-      fd.append('model_file', new Blob([binary], { type: 'application/octet-stream' }), 'model.keras');
-      fd.append('data_path', getDataPath());
-
-      const r    = await fetch(PREDICT_RUN_URL, { method: 'POST', body: fd });
-      const data = await r.json();
-
-      btn.disabled = false;
-      btn.textContent = 'Run prediction';
-
-      if (!data.ok) {
-        errEl.textContent = 'Prediction failed: ' + data.error;
-        errEl.classList.remove('d-none');
-        return;
+      // Build input tensor
+      const flat = new Float32Array(keys.length * maxLen * nChannels);
+      let off = 0;
+      for (const k of keys) {
+        for (const row of processedCache[k]) for (const v of row) flat[off++] = v;
       }
+      const X = tf.tensor4d(flat, [keys.length, maxLen, nChannels, 1]);
 
-      predictions    = data.predictions || [];
-      groupByCol     = data.group_by_col || groupByCol;
-      activeDataPath = data.data_path || getDataPath();
-      plotReady      = false;
+      // Inference
+      const rawPreds = await tf.tidy(() => activeModel.predict(X)).data();
+      X.dispose();
+
+      const timeScale = (maxLen - 1) / maxLen;
+      predictions = keys.map((k, i) => ({
+        [groupByCol]: k,
+        predicted_position: rawPreds[i] * maxLen * timeScale,
+      }));
+
+      plotReady = false;
       renderResults();
-    } catch (err) {
-      btn.disabled = false;
-      btn.textContent = 'Run prediction';
-      errEl.textContent = 'Prediction failed: ' + err.message;
+    } catch (e) {
+      errEl.textContent = 'Prediction failed: ' + e.message;
       errEl.classList.remove('d-none');
     }
+    btn.disabled = false;
+    btn.textContent = 'Run prediction';
+    updateRunBtn();
   });
 
-  // ---- Results ----
+  // ── Results ───────────────────────────────────────────────────────────────
+
   function renderResults() {
     if (!predictions.length) return;
-
     document.getElementById('results-thead-row').innerHTML =
       `<th>${groupByCol}</th><th>Predicted position</th>`;
-
     document.getElementById('results-tbody').innerHTML = predictions
-      .map(r => `<tr><td>${r[groupByCol]}</td><td>${parseFloat(r.predicted_position).toFixed(4)}</td></tr>`)
+      .map(r => `<tr><td>${r[groupByCol]}</td><td>${r.predicted_position.toFixed(4)}</td></tr>`)
       .join('');
-
     document.getElementById('sample-select').innerHTML = predictions
-      .map(r => `<option value="${r[groupByCol]}">${r[groupByCol]}</option>`)
-      .join('');
-
+      .map(r => `<option value="${r[groupByCol]}">${r[groupByCol]}</option>`).join('');
     document.getElementById('results-header').textContent =
       `Results — ${predictions.length} sample${predictions.length !== 1 ? 's' : ''}`;
-
     document.getElementById('results-card').classList.remove('d-none');
     showView('table');
   }
 
-  // ---- Plot view ----
+  // Download predictions CSV
+  document.getElementById('dl-csv-btn').addEventListener('click', () => {
+    if (!predictions.length) return;
+    const header = `${groupByCol},predicted_position\n`;
+    const rows   = predictions.map(r => `${r[groupByCol]},${r.predicted_position}`).join('\n');
+    const blob   = new Blob([header + rows], { type: 'text/csv' });
+    const url    = URL.createObjectURL(blob);
+    const a      = document.createElement('a');
+    a.href = url; a.download = 'predictions.csv';
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+
+  // ── Plot view ─────────────────────────────────────────────────────────────
+
   function showView(view) {
     const isTable = view === 'table';
     document.getElementById('view-table').classList.toggle('d-none', !isTable);
     document.getElementById('view-plot').classList.toggle('d-none', isTable);
     document.getElementById('btn-table').className = 'btn btn-sm ' + (isTable ? 'btn-primary' : 'btn-outline-secondary');
     document.getElementById('btn-plot').className  = 'btn btn-sm ' + (!isTable ? 'btn-primary' : 'btn-outline-secondary');
-    if (!isTable && !plotReady) {
-      syncControls();
-      loadTrace(predictions[currentIdx][groupByCol]);
-    }
+    if (!isTable && !plotReady) { currentIdx = 0; syncControls(); renderTrace(currentIdx); }
   }
 
   function syncControls() {
     const keys = predictions.map(r => String(r[groupByCol]));
-    document.getElementById('sample-select').value = keys[currentIdx];
-    document.getElementById('btn-prev').disabled = currentIdx === 0;
-    document.getElementById('btn-next').disabled = currentIdx === keys.length - 1;
-    document.getElementById('sample-counter').textContent = `${currentIdx + 1} / ${keys.length}`;
+    document.getElementById('sample-select').value           = keys[currentIdx];
+    document.getElementById('btn-prev').disabled              = currentIdx === 0;
+    document.getElementById('btn-next').disabled              = currentIdx === keys.length - 1;
+    document.getElementById('sample-counter').textContent     = `${currentIdx + 1} / ${keys.length}`;
   }
 
   function stepSample(delta) {
@@ -395,79 +417,71 @@
     if (next < 0 || next >= predictions.length) return;
     currentIdx = next;
     syncControls();
-    loadTrace(predictions[currentIdx][groupByCol]);
+    renderTrace(currentIdx);
   }
 
-  function loadTrace(key) {
-    const dp  = activeDataPath || DEFAULT_DATA_PATH;
-    const url = `${SAMPLE_DATA_URL}?key=${encodeURIComponent(key)}&data_path=${encodeURIComponent(dp)}`;
-    fetch(url)
-      .then(r => r.json())
-      .then(data => {
-        if (data.error) { console.error(data.error); return; }
-        plotReady = true;
+  function renderTrace(idx) {
+    const row  = predictions[idx];
+    const key  = String(row[groupByCol]);
+    const pred = row.predicted_position;
 
-        const traces = data.series.map(s => ({
-          x: data.x, y: s.y, name: s.name, type: 'scatter', mode: 'lines',
-          line: { width: 1.5 },
-        }));
-        const shapes = [], annotations = [];
-        if (data.predicted_position !== null) {
-          shapes.push({
-            type: 'line',
-            x0: data.predicted_position, x1: data.predicted_position,
-            y0: 0, y1: 1, xref: 'x', yref: 'paper',
-            line: { color: '#0d6efd', width: 2, dash: 'dash' },
-          });
-          annotations.push({
-            x: data.predicted_position, y: 0.98,
-            xref: 'x', yref: 'paper',
-            text: `pred: ${data.predicted_position.toFixed(2)}`,
-            showarrow: false,
-            font: { color: '#0d6efd', size: 11 },
-            xanchor: 'left', yanchor: 'top',
-            bgcolor: 'rgba(255,255,255,0.7)', borderpad: 2,
-          });
-        }
-        Plotly.react('trace-plot', traces, {
-          margin: { t: 16, r: 16, b: 80, l: 50 },
-          showlegend: true, legend: { orientation: 'h', x: 0, y: -0.25 },
-          xaxis: { title: 'Time' },
-          yaxis: { title: 'Normalized value', range: [-0.05, 1.05] },
-          shapes, annotations,
-        }, { responsive: true });
-      });
+    if (!traceData || !traceData.samples[key]) return;
+    const shape    = activeModel ? activeModel.inputs[0].shape : [null, null, null, 1];
+    const maxLen   = shape[1] || traceData.max_len;
+    const trimRatio = (modelMeta && modelMeta.trimRatio != null) ? modelMeta.trimRatio : 0.1;
+
+    const processed = processedCache[key] ||
+      trimAndPad(traceData.samples[key].channels, trimRatio, maxLen);
+    processedCache[key] = processed;
+
+    const xVals = Array.from({ length: processed.length }, (_, i) => i);
+    const nCh   = processed[0].length;
+    const cols  = traceData.channel_cols;
+
+    const traces = Array.from({ length: nCh }, (_, c) => ({
+      x: xVals,
+      y: processed.map(row => row[c]),
+      name: cols[c] || `ch${c}`,
+      type: 'scatter', mode: 'lines', line: { width: 1.5 },
+    }));
+
+    const predIdx = pred / ((maxLen - 1) / maxLen);  // convert back to index space
+    const shapes  = [{ type: 'line', x0: predIdx, x1: predIdx, y0: 0, y1: 1,
+      xref: 'x', yref: 'paper', line: { color: '#0d6efd', width: 2, dash: 'dash' } }];
+    const annots  = [{ x: predIdx, y: 0.98, xref: 'x', yref: 'paper',
+      text: `pred: ${pred.toFixed(2)}`, showarrow: false,
+      font: { color: '#0d6efd', size: 11 }, xanchor: 'left', yanchor: 'top',
+      bgcolor: 'rgba(255,255,255,0.7)', borderpad: 2 }];
+
+    Plotly.react('trace-plot', traces, {
+      margin: { t: 16, r: 16, b: 80, l: 50 },
+      showlegend: true, legend: { orientation: 'h', x: 0, y: -0.25 },
+      xaxis: { title: 'Step' },
+      yaxis: { title: 'Normalized value', range: [-0.05, 1.05] },
+      shapes, annotations: annots,
+    }, { responsive: true });
+    plotReady = true;
   }
 
   document.getElementById('btn-table').addEventListener('click', () => showView('table'));
   document.getElementById('btn-plot').addEventListener('click',  () => showView('plot'));
   document.getElementById('btn-prev').addEventListener('click',  () => stepSample(-1));
   document.getElementById('btn-next').addEventListener('click',  () => stepSample(1));
-
   document.getElementById('sample-select').addEventListener('change', e => {
     currentIdx = predictions.findIndex(r => String(r[groupByCol]) === e.target.value);
     if (currentIdx < 0) currentIdx = 0;
     syncControls();
-    loadTrace(predictions[currentIdx][groupByCol]);
+    renderTrace(currentIdx);
   });
 
-  // ---- Page load: read model from IndexedDB ----
-  loadStoredModel()
-    .then(stored => {
-      memoryModel = stored;
-      if (stored) {
-        setActiveModel({
-          source: 'memory',
-          binary: stored.binary,
-          file: null,
-          meta: stored.meta || {},
-          label: `Trained model (${new Date(stored.timestamp).toLocaleString()})`,
-        });
-      } else {
-        setActiveModel(null);
-      }
-    })
-    .catch(() => setActiveModel(null));
+  // ── Page init ─────────────────────────────────────────────────────────────
+
+  (async () => {
+    await loadFromIDB();
+    try {
+      await loadTraceData(getDataPath());
+    } catch { /* non-fatal */ }
+  })();
 })();
 </script>
 {% endblock %}

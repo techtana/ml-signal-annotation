@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import base64
 import io
 import json
-import os
-import tempfile
 import zipfile
 from dataclasses import replace
 from pathlib import Path
@@ -17,17 +14,22 @@ from ..services.cnn_pipeline import (
     CnnConfig,
     annotation_path_for,
     load_and_group,
-    load_model_meta,
     normalize_sample_key,
-    predict_only,
-    train_and_predict,
 )
 from ..services.config_store import load_config, save_config
 from ..services.state import load_state, reset_state, save_state
 from ..services.trace_files import delete_temp_trace, is_temp_upload, save_uploaded_trace
-from utils.preprocess import normalize
 
 bp = Blueprint("cnn", __name__)
+
+
+def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Min-max normalize each column, preserving index and column names."""
+    result = df.copy()
+    for col in result.columns:
+        mn, mx = result[col].min(), result[col].max()
+        result[col] = 0.0 if mn == mx else (result[col] - mn) / (mx - mn)
+    return result
 
 
 def _sample_sort_key(value: str):
@@ -163,12 +165,7 @@ def download_sample():
             zf.write(ann_path, "sample_annotations.csv")
     buf.seek(0)
 
-    return send_file(
-        buf,
-        mimetype="application/zip",
-        as_attachment=True,
-        download_name="sample_data.zip",
-    )
+    return send_file(buf, mimetype="application/zip", as_attachment=True, download_name="sample_data.zip")
 
 
 @bp.get("/annotate")
@@ -194,7 +191,6 @@ def annotate():
                 current_key = state.keys[state.idx]
             elif state.keys:
                 current_key = state.keys[-1]
-
             state = reset_state(keys=keys, trim_ratio=runtime_cfg.trim_ratio)
             if current_key in keys:
                 state.idx = keys.index(current_key)
@@ -220,7 +216,7 @@ def annotate():
 
     trace = groups[key]
     trim = int(len(trace) * runtime_cfg.trim_ratio)
-    trimmed = normalize(trace.iloc[trim : len(trace) - trim])
+    trimmed = _normalize_df(trace.iloc[trim : len(trace) - trim])
 
     existing = df_ann[df_ann[cfg.group_by_col] == str(key)]
     existing_label = float(existing["label"].iloc[0]) if len(existing) else None
@@ -268,7 +264,6 @@ def annotate_reset():
 
 @bp.post("/annotate/skip")
 def annotate_skip():
-    cfg = load_config()
     state = load_state()
     if state is None:
         return redirect(url_for("cnn.annotate"))
@@ -299,23 +294,10 @@ def annotate_label():
     return jsonify({"ok": True})
 
 
-@bp.route("/train", methods=["GET", "POST"])
+@bp.get("/train")
 def train():
     cfg = load_config()
     active_trace_path = _active_trace_path(cfg)
-
-    if request.method == "POST":
-        if not active_trace_path or not Path(active_trace_path).exists():
-            return jsonify({"ok": False, "error": "Select or upload an annotated trace CSV first."})
-        try:
-            summary = train_and_predict(replace(cfg, data_path=active_trace_path))
-            model_path = summary["model_path"]
-            model_b64 = base64.b64encode(Path(model_path).read_bytes()).decode()
-            meta = load_model_meta(model_path)
-            return jsonify({"ok": True, "summary": summary, "model_b64": model_b64, "meta": meta})
-        except Exception as e:
-            return jsonify({"ok": False, "error": str(e)})
-
     df_ann = (
         load_annotations(active_trace_path, cfg.group_by_col)
         if active_trace_path and Path(active_trace_path).exists()
@@ -329,6 +311,92 @@ def train():
     )
 
 
+@bp.get("/training-data")
+def training_data():
+    """Return all trace samples + annotations as JSON for client-side training."""
+    cfg = load_config()
+    active_trace_path = session.get("active_trace_path") or cfg.data_path
+    if not active_trace_path or not Path(active_trace_path).exists():
+        return jsonify({"error": "No active trace file. Select one first."}), 404
+
+    groups, channel_cols, max_len = load_and_group(
+        active_trace_path, cfg.group_by_col, cfg.time_index_col, cfg.channel_cols
+    )
+
+    ann_path = annotation_path_for(active_trace_path)
+    annotations: dict[str, float] = {}
+    if ann_path.exists():
+        df_ann = pd.read_csv(ann_path)
+        for _, row in df_ann.iterrows():
+            key = normalize_sample_key(row[cfg.group_by_col])
+            if pd.notna(row.get("label")):
+                annotations[key] = float(row["label"])
+
+    samples = {
+        key: {
+            "time": [float(v) for v in df.index.values],
+            "channels": [[float(v) for v in row] for row in df.values],
+        }
+        for key, df in groups.items()
+    }
+
+    return jsonify({
+        "samples": samples,
+        "annotations": annotations,
+        "channel_cols": channel_cols,
+        "max_len": max_len,
+        "cfg": {
+            "trim_ratio": cfg.trim_ratio,
+            "test_size": cfg.test_size,
+            "random_state": cfg.random_state,
+            "num_epochs": cfg.num_epochs,
+            "batch_size": cfg.batch_size,
+            "group_by_col": cfg.group_by_col,
+        },
+    })
+
+
+@bp.get("/trace-data")
+def trace_data():
+    """Return trace samples (+ annotations if present) as JSON for client-side inference."""
+    cfg = load_config()
+    path = request.args.get("path", "").strip() or cfg.data_path
+    if not Path(path).exists():
+        return jsonify({"error": f"File not found: {path}"}), 404
+
+    groups, channel_cols, max_len = load_and_group(
+        path, cfg.group_by_col, cfg.time_index_col, cfg.channel_cols
+    )
+
+    ann_path = annotation_path_for(path)
+    annotations: dict[str, float] = {}
+    if ann_path.exists():
+        try:
+            df_ann = pd.read_csv(ann_path)
+            for _, row in df_ann.iterrows():
+                key = normalize_sample_key(row[cfg.group_by_col])
+                if pd.notna(row.get("label")):
+                    annotations[key] = float(row["label"])
+        except Exception:
+            pass
+
+    samples = {
+        key: {
+            "time": [float(v) for v in df.index.values],
+            "channels": [[float(v) for v in row] for row in df.values],
+        }
+        for key, df in groups.items()
+    }
+
+    return jsonify({
+        "samples": samples,
+        "channel_cols": channel_cols,
+        "max_len": max_len,
+        "annotations": annotations,
+        "group_by_col": cfg.group_by_col,
+    })
+
+
 @bp.get("/predict")
 def predict():
     cfg = load_config()
@@ -340,123 +408,3 @@ def predict():
         csv_options=csv_options,
         selected_data_path=selected_data_path,
     )
-
-
-@bp.post("/predict/run")
-def predict_run():
-    cfg = load_config()
-    data_path = request.form.get("data_path", "").strip() or cfg.data_path
-    model_file = request.files.get("model_file")
-
-    if not model_file:
-        return jsonify({"ok": False, "error": "No model file provided."}), 400
-    if not Path(data_path).exists():
-        return jsonify({"ok": False, "error": f"Data file not found: {data_path}"}), 400
-
-    fd, tmp_path = tempfile.mkstemp(suffix=".keras")
-    try:
-        os.close(fd)
-        model_file.save(tmp_path)
-        predict_cfg = replace(cfg, data_path=data_path)
-        summary = predict_only(cfg=predict_cfg, model_path=tmp_path)
-        pred_path = Path(cfg.output_path)
-        predictions = pd.read_csv(pred_path).to_dict(orient="records") if pred_path.exists() else []
-        return jsonify({
-            "ok": True,
-            "summary": summary,
-            "predictions": predictions,
-            "group_by_col": cfg.group_by_col,
-            "data_path": data_path,
-        })
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
-
-
-def _extract_keras_input_shape(config: dict) -> tuple[int | None, int | None]:
-    """Parse a Keras config.json and return (max_len, num_channels) from the input layer."""
-    layers = config.get("config", {}).get("layers", [])
-    for layer in layers:
-        lc = layer.get("config", {})
-        # Keras 3 uses 'batch_shape'; Keras 2 uses 'batch_input_shape'
-        shape = lc.get("batch_input_shape") or lc.get("batch_shape") or lc.get("build_input_shape")
-        if shape and len(shape) >= 3:
-            return shape[1], shape[2]
-    return None, None
-
-
-@bp.post("/predict/model-meta")
-def predict_model_meta():
-    """Accept a .keras file upload and return its input shape without loading TF."""
-    model_file = request.files.get("model_file")
-    if not model_file:
-        return jsonify({"error": "No model file provided."}), 400
-    try:
-        buf = io.BytesIO(model_file.read())
-        with zipfile.ZipFile(buf) as zf:
-            if "config.json" not in zf.namelist():
-                return jsonify({"error": "Not a valid .keras file (missing config.json)"}), 400
-            config = json.loads(zf.read("config.json"))
-        max_len, num_channels = _extract_keras_input_shape(config)
-        if max_len is None:
-            return jsonify({"error": "Could not determine input shape from model config."}), 400
-        return jsonify({"max_len": max_len, "num_channels": num_channels, "channel_cols": []})
-    except zipfile.BadZipFile:
-        return jsonify({"error": "File is not a valid .keras archive."}), 400
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-
-@bp.get("/predict/data-info")
-def predict_data_info():
-    cfg = load_config()
-    data_path = request.args.get("data_path", cfg.data_path).strip()
-    if not Path(data_path).exists():
-        return jsonify({"error": f"File not found: {data_path}"}), 404
-    df = pd.read_csv(data_path, nrows=5)
-    channel_cols = [c for c in df.columns if c not in (cfg.group_by_col, cfg.time_index_col, "label")]
-    return jsonify({"num_channels": len(channel_cols), "channel_cols": channel_cols})
-
-
-@bp.get("/predict/sample-data")
-def predict_sample_data():
-    cfg = load_config()
-    key = request.args.get("key", "").strip()
-    data_path = request.args.get("data_path", cfg.data_path).strip()
-
-    if not key:
-        return jsonify({"error": "key is required"}), 400
-    if not Path(data_path).exists():
-        return jsonify({"error": f"Trace file not found: {data_path}"}), 404
-
-    pred_path = Path(cfg.output_path)
-    if not pred_path.exists():
-        return jsonify({"error": "No predictions file found"}), 404
-
-    groups, _, _ = load_and_group(data_path, cfg.group_by_col, cfg.time_index_col, cfg.channel_cols)
-    norm_key = normalize_sample_key(key)
-
-    if norm_key not in groups:
-        return jsonify({"error": f"Sample '{key}' not found in {data_path}"}), 404
-
-    trace = groups[norm_key]
-    trim = int(len(trace) * cfg.trim_ratio)
-    trimmed = normalize(trace.iloc[trim: len(trace) - trim])
-
-    preds_df = pd.read_csv(pred_path)
-    preds_df["_norm_key"] = preds_df[cfg.group_by_col].astype(str).map(normalize_sample_key)
-    match = preds_df[preds_df["_norm_key"] == norm_key]
-    predicted_position = float(match["predicted_position"].iloc[0]) if len(match) else None
-
-    return jsonify({
-        "x": [float(v) for v in trimmed.index.values],
-        "series": [
-            {"name": col, "y": [float(v) for v in trimmed[col].values]}
-            for col in trimmed.columns
-        ],
-        "predicted_position": predicted_position,
-    })
