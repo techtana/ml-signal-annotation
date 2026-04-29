@@ -1,14 +1,14 @@
 # ML Annotation & Regression Pipeline
 
-A toolkit for interactive time-series annotation and multi-source tabular regression modeling. Designed for workflows where sensor or process data needs to be labeled and then used to train predictive models.
+A Flask web app for interactive time-series annotation and CNN regression modeling. Annotate multi-channel time-series samples by clicking on a Plotly chart, then train a CNN to predict the labeled position automatically.
 
 ---
 
 ## Overview
 
-**Interactive Annotation + CNN Regressor**  
+**Interactive Annotation + CNN Regressor**
 
-Annotate multi-channel time-series samples by clicking on a plot, then train a CNN to predict the labeled position automatically. Available as both a Flask web app (browser-based, no matplotlib required) and as standalone CLI scripts.
+Annotate multi-channel time-series samples by clicking on a plot, then train a CNN to predict the labeled position automatically.
 
 ---
 
@@ -90,9 +90,7 @@ Open **http://localhost:8972** in your browser.
 │       └── prediction_template.csv
 │
 ├── utils/
-│   ├── preprocess.py            # normalize, equalize_length, plot_training_history
-│   ├── io.py                    # JSON config helpers, section printer
-│   └── spark.py                 # PySpark / Hive query utilities
+│   └── preprocess.py            # normalize, equalize_length
 │
 ├── data/
 │   ├── traces/                  # input trace CSVs (read-only during the workflow)
@@ -192,14 +190,10 @@ pip install -r requirements.txt
 
 | Package | Used by |
 |---|---|
-| `tensorflow >= 2.13` | CNN model (train.py, app) |
-| `keras` | included with TensorFlow |
+| `tensorflow >= 2.13` | CNN model (includes Keras) |
 | `scikit-learn` | normalization, train/test split |
 | `pandas`, `numpy` | data handling throughout |
-| `matplotlib` | CLI annotation UI (annotate.py, train.py) |
 | `flask >= 3.0` | web app |
-| `pyarrow >= 13` | Parquet I/O in the regression pipeline |
-| `pyspark >= 3.4` | Hive/Hadoop queries (Component 2 only) |
 
 Optional:
 
