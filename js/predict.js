@@ -1,10 +1,17 @@
 (function () {
-  const { TRACE_DATA_URL, DEFAULT_DATA_PATH, GROUP_BY_COL, TIME_INDEX_COL, CHANNEL_COLS } =
-    window.CNN_PREDICT_CFG;
+  'use strict';
+
   const META_KEY  = 'cnn-model-meta';
   const IDB_MODEL = 'indexeddb://cnn-latest';
 
+  // Read column config from store (evaluated once on page load)
+  const _cfg          = CnnStore.loadConfig();
+  const GROUP_BY_COL  = _cfg.group_by_col;
+  const TIME_INDEX_COL = _cfg.time_index_col;
+  const CHANNEL_COLS  = _cfg.channel_cols || [];
+
   // ── State ─────────────────────────────────────────────────────────────────
+
   let activeModel    = null;
   let modelMeta      = null;
   let traceData      = null;
@@ -15,7 +22,7 @@
   let plotReady      = false;
   let hasBrowserModel = false;
 
-  // ── Preprocessing (mirrors Python load_and_group + normalize) ─────────────
+  // ── Preprocessing ─────────────────────────────────────────────────────────
 
   function minMaxNormalize(channels) {
     const nCh = channels[0].length;
@@ -33,94 +40,20 @@
   }
 
   function trimAndPad(channels, trimRatio, maxLen) {
-    const n = channels.length;
+    const n    = channels.length;
     const trim = Math.floor(n * trimRatio);
     let sliced = channels.slice(trim, n - trim || n);
     if (!sliced.length) throw new Error('All rows trimmed');
     const normed = minMaxNormalize(sliced);
-    const last = normed[normed.length - 1];
+    const last   = normed[normed.length - 1];
     while (normed.length < maxLen) normed.push([...last]);
     return normed;
-  }
-
-  // ── Client-side CSV parser (mirrors Python load_and_group) ────────────────
-
-  function parseCSVRow(line) {
-    const result = [];
-    let inQuotes = false, cur = '';
-    for (const ch of line) {
-      if (ch === '"') { inQuotes = !inQuotes; }
-      else if (ch === ',' && !inQuotes) { result.push(cur); cur = ''; }
-      else { cur += ch; }
-    }
-    result.push(cur);
-    return result;
-  }
-
-  function normalizeKey(value) {
-    const text = String(value == null ? '' : value).trim();
-    if (!text) return '';
-    const num = parseFloat(text);
-    if (!isNaN(num) && isFinite(num) && Number.isInteger(num)) return String(num);
-    if (!isNaN(num) && isFinite(num)) return text;
-    return text;
-  }
-
-  function parseTraceData(csvText) {
-    const lines = csvText.split('\n').filter(l => l.trim());
-    if (lines.length < 2) throw new Error('CSV has no data rows');
-    const headers = parseCSVRow(lines[0]).map(h => h.trim());
-
-    const groupIdx = headers.indexOf(GROUP_BY_COL);
-    const timeIdx  = headers.indexOf(TIME_INDEX_COL);
-    if (groupIdx < 0) throw new Error(`Column "${GROUP_BY_COL}" not found in CSV`);
-
-    let channelCols = CHANNEL_COLS && CHANNEL_COLS.length
-      ? CHANNEL_COLS
-      : headers.filter(h => h !== GROUP_BY_COL && h !== TIME_INDEX_COL && h !== 'label');
-    const chanIndices = channelCols.map(c => {
-      const i = headers.indexOf(c);
-      if (i < 0) throw new Error(`Channel column "${c}" not found in CSV`);
-      return i;
-    });
-
-    const rows = lines.slice(1).map(l => parseCSVRow(l));
-
-    if (timeIdx >= 0) {
-      rows.sort((a, b) => parseFloat(a[timeIdx]) - parseFloat(b[timeIdx]));
-    }
-
-    const grouped = {};
-    for (const row of rows) {
-      const key = normalizeKey(row[groupIdx]);
-      if (!grouped[key]) grouped[key] = [];
-      grouped[key].push(row);
-    }
-
-    let maxLen = 0;
-    const samples = {};
-    for (const [key, grpRows] of Object.entries(grouped)) {
-      const dataRows = grpRows.slice(1); // mirrors Python iloc[1:]
-      const time     = dataRows.map(r => timeIdx >= 0 ? parseFloat(r[timeIdx]) : 0);
-      const channels = dataRows.map(r => chanIndices.map(ci => {
-        const v = parseFloat(r[ci]);
-        return isNaN(v) ? 0 : v;
-      }));
-      samples[key] = { time, channels };
-      maxLen = Math.max(maxLen, dataRows.length);
-    }
-
-    return { samples, channel_cols: channelCols, max_len: maxLen, annotations: {}, group_by_col: GROUP_BY_COL };
   }
 
   // ── UI helpers ────────────────────────────────────────────────────────────
 
   function setModelInfo(html)  { document.getElementById('model-info').innerHTML   = html; }
   function setCompatBadge(html){ document.getElementById('compat-badge').innerHTML = html; }
-
-  function getDataPath() {
-    return (document.getElementById('data-path-select').value || '').trim() || DEFAULT_DATA_PATH;
-  }
 
   function updateRunBtn() {
     document.getElementById('run-btn').disabled = !(activeModel && traceData);
@@ -145,14 +78,7 @@
       setCompatBadge(`<span class="badge bg-warning text-dark">&#9888; Column mismatch — data: [${dCols.join(', ')}] &middot; model: [${mCols.join(', ')}]</span>`);
   }
 
-  // ── Load trace data from server ───────────────────────────────────────────
-
-  async function loadTraceData(path) {
-    const r = await fetch(`${TRACE_DATA_URL}?path=${encodeURIComponent(path)}`);
-    const d = await r.json();
-    if (d.error) throw new Error(d.error);
-    setTraceData(d);
-  }
+  // ── Trace data helpers ────────────────────────────────────────────────────
 
   function setTraceData(d) {
     traceData      = d;
@@ -162,16 +88,34 @@
     updateRunBtn();
   }
 
+  // Fetch a sample CSV from a relative URL and parse it client-side
+  async function loadTraceData(sampleUrl) {
+    const r = await fetch(sampleUrl);
+    if (!r.ok) throw new Error(`Failed to load ${sampleUrl}: ${r.status}`);
+    const csvText = await r.text();
+    const parsed  = CsvParser.loadAndGroup(csvText, GROUP_BY_COL, TIME_INDEX_COL, CHANNEL_COLS);
+    if (!Object.keys(parsed.groups).length) throw new Error('No samples found');
+    setTraceData({
+      samples:      parsed.groups,
+      channel_cols: parsed.channelCols,
+      max_len:      parsed.maxLen,
+      annotations:  {},
+      group_by_col: GROUP_BY_COL,
+    });
+  }
+
   document.getElementById('data-path-select').addEventListener('change', async () => {
     document.getElementById('csv-file-info').classList.add('d-none');
+    const val = document.getElementById('data-path-select').value;
+    if (!val) return;
     try {
-      await loadTraceData(getDataPath());
+      await loadTraceData(val);
     } catch (e) {
       setCompatBadge(`<span class="badge bg-warning text-dark">&#9888; ${e.message}</span>`);
     }
   });
 
-  // ── CSV drop zone ────────────────────────────────���────────────────────────
+  // ── CSV drop zone ─────────────────────────────────────────────────────────
 
   const csvDropZone  = document.getElementById('csv-drop-zone');
   const csvFileInput = document.getElementById('csv-file-input');
@@ -191,28 +135,33 @@
     csvFileInfo.textContent = `Loading ${file.name}…`;
     csvFileInfo.classList.remove('d-none');
     try {
-      const text = await file.text();
-      const parsed = parseTraceData(text);
-      if (!Object.keys(parsed.samples).length) throw new Error('No samples found in CSV');
+      const text   = await file.text();
+      const parsed = CsvParser.loadAndGroup(text, GROUP_BY_COL, TIME_INDEX_COL, CHANNEL_COLS);
+      if (!Object.keys(parsed.groups).length) throw new Error('No samples found in CSV');
       document.getElementById('data-path-select').value = '';
-      setTraceData(parsed);
+      setTraceData({
+        samples:      parsed.groups,
+        channel_cols: parsed.channelCols,
+        max_len:      parsed.maxLen,
+        annotations:  {},
+        group_by_col: GROUP_BY_COL,
+      });
       csvFileInfo.innerHTML =
         `<span class="badge bg-secondary me-1">${file.name}</span>` +
-        `<span class="text-secondary">${Object.keys(parsed.samples).length} samples &middot; ` +
-        `${parsed.channel_cols.length} channels</span>`;
+        `<span class="text-secondary">${Object.keys(parsed.groups).length} samples &middot; ` +
+        `${parsed.channelCols.length} channels</span>`;
     } catch (e) {
       csvFileInfo.innerHTML = `<span class="text-danger">Error: ${e.message}</span>`;
     }
   }
 
-  // ── Model load helpers ────────────────────────���───────────────────────────
+  // ── Model helpers ─────────────────────────────────────────────────────────
 
   async function setModel(model, meta) {
     if (activeModel) activeModel.dispose();
     activeModel = model;
     modelMeta   = meta;
     if (!meta) { setModelInfo('<span class="text-warning small">No model loaded.</span>'); updateRunBtn(); return; }
-
     const parts = [];
     if (meta.nChannels) parts.push(`${meta.nChannels} ch`);
     if (meta.maxLen)    parts.push(`${meta.maxLen} steps`);
@@ -242,7 +191,7 @@
           new Date(stored.trainedAt).toLocaleString();
       }
     } catch {
-      // No model in IndexedDB yet
+      // No model in IndexedDB
     }
   }
 
@@ -265,7 +214,7 @@
     await loadFromIDB();
   });
 
-  // ── Split model drop zones (.json / .bin) ────────────────────────────────
+  // ── Split model drop zones (.json / .bin) ─────────────────────────────────
 
   let pendingJsonFile = null;
   let pendingBinFiles = [];
@@ -345,7 +294,7 @@
     }
   }
 
-  // ── Run prediction ──────────────────────────────────────────────────────���─
+  // ── Run prediction ────────────────────────────────────────────────────────
 
   document.getElementById('run-btn').addEventListener('click', async function () {
     if (!activeModel || !traceData) return;
@@ -458,8 +407,8 @@
     const pred = row.predicted_position;
 
     if (!traceData || !traceData.samples[key]) return;
-    const shape    = activeModel ? activeModel.inputs[0].shape : [null, null, null, 1];
-    const maxLen   = shape[1] || traceData.max_len;
+    const shape     = activeModel ? activeModel.inputs[0].shape : [null, null, null, 1];
+    const maxLen    = shape[1] || traceData.max_len;
     const trimRatio = (modelMeta && modelMeta.trimRatio != null) ? modelMeta.trimRatio : 0.1;
 
     const processed = processedCache[key] ||
@@ -471,8 +420,7 @@
     const cols  = traceData.channel_cols;
 
     const traces = Array.from({ length: nCh }, (_, c) => ({
-      x: xVals,
-      y: processed.map(row => row[c]),
+      x: xVals, y: processed.map(row => row[c]),
       name: cols[c] || `ch${c}`,
       type: 'scatter', mode: 'lines', line: { width: 1.5 },
     }));
@@ -506,12 +454,29 @@
     renderTrace(currentIdx);
   });
 
-  // ── Page init ────────────────────────────────────────────────────────��────
+  // ── Page init ─────────────────────────────────────────────────────────────
 
   (async () => {
     await loadFromIDB();
+    // Pre-load active trace from IndexedDB so predict is ready immediately
     try {
-      await loadTraceData(getDataPath());
+      const active = await CnnStore.loadActiveTrace();
+      if (active) {
+        const parsed = CsvParser.loadAndGroup(active.csv, GROUP_BY_COL, TIME_INDEX_COL, CHANNEL_COLS);
+        if (Object.keys(parsed.groups).length) {
+          setTraceData({
+            samples:      parsed.groups,
+            channel_cols: parsed.channelCols,
+            max_len:      parsed.maxLen,
+            annotations:  {},
+            group_by_col: GROUP_BY_COL,
+          });
+          csvFileInfo.innerHTML =
+            `<span class="badge bg-secondary me-1">${active.name}</span>` +
+            `<span class="text-secondary">${Object.keys(parsed.groups).length} samples (active trace)</span>`;
+          csvFileInfo.classList.remove('d-none');
+        }
+      }
     } catch { /* non-fatal */ }
   })();
 })();
