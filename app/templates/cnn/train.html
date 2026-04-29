@@ -2,184 +2,88 @@
 
 {% block title %}Train · CNN{% endblock %}
 
+{% block head %}
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+{% endblock %}
+
 {% block content %}
   <div class="d-flex flex-column flex-md-row justify-content-between align-items-start gap-3 mb-3">
     <div>
       <h1 class="h4 mb-1">Train</h1>
       <div class="text-secondary">
-        Trains the CNN regressor on the active trace CSV and writes predictions to <code>{{ cfg.output_path }}</code>.
+        Trains the CNN regressor in your browser using TensorFlow.js.
       </div>
       {% if active_trace_path %}
         <div class="text-secondary small mt-1">Active file: <code>{{ active_trace_path }}</code></div>
       {% endif %}
     </div>
-    <div>
-      <a class="btn btn-outline-secondary" href="{{ url_for('cnn.settings') }}">Settings</a>
-    </div>
+    <a class="btn btn-outline-secondary" href="{{ url_for('cnn.settings') }}">Settings</a>
   </div>
 
   <div class="row g-3">
+
+    <!-- Left: config + controls -->
     <div class="col-lg-5">
-      <div class="card">
+      <div class="card mb-3">
         <div class="card-body">
           <div class="text-secondary small">Annotations</div>
           <div class="h5 mb-3">{{ annotated_count }}</div>
           <div class="text-secondary small">Epochs / Batch</div>
           <div class="mb-3">{{ cfg.num_epochs }} / {{ cfg.batch_size }}</div>
-          <button class="btn btn-primary" id="train-btn" type="button">Run training</button>
-          <div class="form-text mt-2">Training runs in-process; large datasets may take a while.</div>
+          <button class="btn btn-primary" id="train-btn">Run training</button>
+          <div class="form-text mt-2">Training runs in your browser via TensorFlow.js (WebGL).</div>
           <div id="train-error" class="alert alert-danger mt-2 d-none" role="alert"></div>
+        </div>
+      </div>
+
+      <!-- Progress (hidden until training starts) -->
+      <div class="card d-none" id="progress-card">
+        <div class="card-body">
+          <div class="d-flex justify-content-between mb-1">
+            <span class="small" id="epoch-label">Epoch 0 / {{ cfg.num_epochs }}</span>
+            <span class="small text-secondary" id="loss-label">&nbsp;</span>
+          </div>
+          <div class="progress mb-0" style="height:6px">
+            <div class="progress-bar" id="progress-bar" style="width:0%"></div>
+          </div>
         </div>
       </div>
     </div>
 
+    <!-- Right: loss chart + latest run -->
     <div class="col-lg-7">
+
+      <!-- Loss chart (hidden until training starts) -->
+      <div class="card mb-3 d-none" id="chart-card">
+        <div class="card-body p-2">
+          <div id="loss-chart" style="height:220px"></div>
+        </div>
+      </div>
+
+      <!-- Latest run -->
       <div class="card">
         <div class="card-body">
           <div class="d-flex justify-content-between align-items-center mb-2">
             <h2 class="h6 mb-0">Latest run</h2>
-            <button class="btn btn-sm btn-outline-secondary d-none" id="download-btn">Download model</button>
+            <button class="btn btn-sm btn-outline-secondary d-none" id="download-btn">
+              Download model
+            </button>
           </div>
           <div id="latest-run-content">
             <div class="text-secondary">Loading&hellip;</div>
           </div>
+          <div id="download-note" class="form-text d-none">
+            Downloads <code>model.json</code> + <code>model.weights.bin</code> — keep both files together.
+          </div>
         </div>
       </div>
+
     </div>
   </div>
 {% endblock %}
 
 {% block scripts %}
-<script>
-(function () {
-  const TRAIN_URL = {{ url_for('cnn.train') | tojson }};
-  const DB_NAME = 'ml_cnn_tool';
-  const DB_VERSION = 1;
-  const STORE_NAME = 'models';
-
-  // ---- IndexedDB helpers ----
-  function openDB() {
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, DB_VERSION);
-      req.onupgradeneeded = e => e.target.result.createObjectStore(STORE_NAME, { keyPath: 'id' });
-      req.onsuccess = e => resolve(e.target.result);
-      req.onerror = e => reject(e.target.error);
-    });
-  }
-
-  function storeModel(record) {
-    return openDB().then(db => new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, 'readwrite');
-      tx.objectStore(STORE_NAME).put({ id: 'latest', ...record });
-      tx.oncomplete = resolve;
-      tx.onerror = e => reject(e.target.error);
-    }));
-  }
-
-  function loadStoredModel() {
-    return openDB().then(db => new Promise((resolve, reject) => {
-      const req = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).get('latest');
-      req.onsuccess = e => resolve(e.target.result || null);
-      req.onerror = e => reject(e.target.error);
-    }));
-  }
-
-  function b64ToArrayBuffer(b64) {
-    const bstr = atob(b64);
-    const bytes = new Uint8Array(bstr.length);
-    for (let i = 0; i < bstr.length; i++) bytes[i] = bstr.charCodeAt(i);
-    return bytes.buffer;
-  }
-
-  // ---- Render latest run card ----
-  function renderLatestRun(record) {
-    const content = document.getElementById('latest-run-content');
-    const dlBtn = document.getElementById('download-btn');
-
-    if (!record) {
-      content.innerHTML = '<div class="text-secondary">No run yet.</div>';
-      dlBtn.classList.add('d-none');
-      return;
-    }
-
-    const s = record.summary || {};
-    const m = record.meta || {};
-    const dt = record.timestamp ? new Date(record.timestamp).toLocaleString() : '—';
-
-    const rows = [
-      ['Trained',    dt],
-      ['Device',     s.device || '—'],
-      ['Samples',    s.num_samples    ?? '—'],
-      ['Annotated',  s.num_annotated  ?? '—'],
-      ['Final loss', s.final_loss     != null ? s.final_loss.toFixed(6)     : '—'],
-      ['Val loss',   s.final_val_loss != null ? s.final_val_loss.toFixed(6) : '—'],
-      ['Channels',   m.num_channels   ?? '—'],
-      ['Max steps',  m.max_len        ?? '—'],
-      ['Trim ratio', m.trim_ratio     ?? '—'],
-    ].map(([k, v]) =>
-      `<tr><th class="fw-normal text-secondary pe-3" style="white-space:nowrap;width:1%">${k}</th><td>${v}</td></tr>`
-    ).join('');
-
-    content.innerHTML = `<table class="table table-sm mb-0"><tbody>${rows}</tbody></table>`;
-
-    dlBtn.classList.remove('d-none');
-    dlBtn.onclick = function () {
-      const blob = new Blob([record.binary], { type: 'application/octet-stream' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      const ts = (record.timestamp || '').replace(/[^0-9]/g, '').slice(0, 14) || String(Date.now());
-      a.download = `cnn_model_${ts}.keras`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-    };
-  }
-
-  // Show stored model on page load
-  loadStoredModel()
-    .then(renderLatestRun)
-    .catch(() => {
-      document.getElementById('latest-run-content').innerHTML = '<div class="text-secondary">No run yet.</div>';
-    });
-
-  // ---- Training ----
-  document.getElementById('train-btn').addEventListener('click', function () {
-    const btn = this;
-    const errEl = document.getElementById('train-error');
-    btn.disabled = true;
-    btn.textContent = 'Training…';
-    errEl.classList.add('d-none');
-
-    fetch(TRAIN_URL, { method: 'POST' })
-      .then(r => r.json())
-      .then(data => {
-        btn.disabled = false;
-        btn.textContent = 'Run training';
-        if (!data.ok) {
-          errEl.textContent = 'Training failed: ' + data.error;
-          errEl.classList.remove('d-none');
-          return;
-        }
-        const binary = b64ToArrayBuffer(data.model_b64);
-        const record = {
-          binary,
-          meta: data.meta || {},
-          summary: data.summary || {},
-          timestamp: new Date().toISOString(),
-        };
-        storeModel(record)
-          .then(() => renderLatestRun({ id: 'latest', ...record }))
-          .catch(console.error);
-      })
-      .catch(err => {
-        btn.disabled = false;
-        btn.textContent = 'Run training';
-        errEl.textContent = 'Training failed: ' + err.message;
-        errEl.classList.remove('d-none');
-      });
-  });
-})();
-</script>
+<script>window.CNN_TRAIN_CFG = { TRAINING_DATA_URL: {{ url_for('cnn.training_data') | tojson }} };</script>
+<script src="{{ url_for('static', filename='js/train.js') }}"></script>
 {% endblock %}
