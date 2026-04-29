@@ -282,14 +282,6 @@ def load_model_meta(model_path: str) -> dict:
     return {}
 
 
-def find_latest_model(artifacts_dir: str = "artifacts") -> str | None:
-    p = Path(artifacts_dir)
-    if not p.exists():
-        return None
-    models = sorted(p.glob("cnn_regressor_*.keras"), key=lambda x: x.stat().st_mtime, reverse=True)
-    return models[0].as_posix() if models else None
-
-
 def predict_only(*, cfg: CnnConfig, model_path: str) -> dict:
     """Load an existing model, validate input compatibility, and write predictions CSV."""
     from keras.models import load_model

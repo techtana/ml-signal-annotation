@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import base64
 import io
 import json
+import os
+import tempfile
 import zipfile
 from dataclasses import replace
 from pathlib import Path
@@ -13,7 +16,6 @@ from ..services.annotations import load_annotations, upsert_annotation
 from ..services.cnn_pipeline import (
     CnnConfig,
     annotation_path_for,
-    find_latest_model,
     load_and_group,
     load_model_meta,
     normalize_sample_key,
@@ -96,7 +98,6 @@ def _get_groups_and_keys(cfg: CnnConfig):
 
 
 def _trace_file_options() -> list[str]:
-    """Return CSVs from data/traces/ only."""
     traces_dir = Path("data") / "traces"
     if not traces_dir.exists():
         return []
@@ -151,8 +152,6 @@ def source():
 
 @bp.get("/download-sample")
 def download_sample():
-    """Return a ZIP containing a sample trace CSV and its companion annotation CSV."""
-    # Use sample_b which has both traces and pre-generated annotations.
     trace_path = Path("data") / "traces" / "sample_b_traces.csv"
     ann_path = annotation_path_for(trace_path.as_posix())
 
@@ -303,72 +302,113 @@ def annotate_label():
 @bp.route("/train", methods=["GET", "POST"])
 def train():
     cfg = load_config()
-    summary = None
     active_trace_path = _active_trace_path(cfg)
+
     if request.method == "POST":
         if not active_trace_path or not Path(active_trace_path).exists():
-            flash("Select or upload an annotated trace CSV first.", "danger")
-            return redirect(url_for("cnn.train"))
+            return jsonify({"ok": False, "error": "Select or upload an annotated trace CSV first."})
         try:
             summary = train_and_predict(replace(cfg, data_path=active_trace_path))
-            flash("Training complete. Predictions written.", "success")
+            model_path = summary["model_path"]
+            model_b64 = base64.b64encode(Path(model_path).read_bytes()).decode()
+            meta = load_model_meta(model_path)
+            return jsonify({"ok": True, "summary": summary, "model_b64": model_b64, "meta": meta})
         except Exception as e:
-            flash(f"Training failed: {e}", "danger")
+            return jsonify({"ok": False, "error": str(e)})
 
-    df_ann = load_annotations(active_trace_path, cfg.group_by_col) if active_trace_path and Path(active_trace_path).exists() else pd.DataFrame()
-    return render_template("cnn/train.html", cfg=cfg, summary=summary, annotated_count=len(df_ann), active_trace_path=active_trace_path)
-
-
-@bp.route("/predict", methods=["GET", "POST"])
-def predict():
-    cfg = load_config()
-    latest = find_latest_model(cfg.artifacts_dir)
-    csv_options = _trace_file_options()
-    model_training_path = load_model_meta(latest).get("data_path") if latest else None
-    selected_data_path = session.get("active_trace_path") or model_training_path or cfg.data_path
-    summary = None
-
-    if request.method == "POST":
-        selected_data_path = request.form.get("data_path", "").strip() or cfg.data_path
-        model_path = request.form.get("model_path", "").strip() or latest
-        if not model_path:
-            flash("No model found. Train first or provide a model path.", "danger")
-            return redirect(url_for("cnn.predict"))
-        if not Path(selected_data_path).exists():
-            flash(f"Prediction data file not found: {selected_data_path}", "danger")
-        else:
-            try:
-                predict_cfg = replace(cfg, data_path=selected_data_path)
-                summary = predict_only(cfg=predict_cfg, model_path=model_path)
-                flash("Prediction complete. Predictions written.", "success")
-            except Exception as e:
-                flash(f"Prediction failed: {e}", "danger")
-
-    predictions = None
-    pred_path = Path(cfg.output_path)
-    if pred_path.exists():
-        predictions = pd.read_csv(pred_path).to_dict(orient="records")
-
+    df_ann = (
+        load_annotations(active_trace_path, cfg.group_by_col)
+        if active_trace_path and Path(active_trace_path).exists()
+        else pd.DataFrame()
+    )
     return render_template(
-        "cnn/predict.html",
+        "cnn/train.html",
         cfg=cfg,
-        latest_model=latest,
-        summary=summary,
-        csv_options=csv_options,
-        selected_data_path=selected_data_path,
-        predictions=predictions,
+        annotated_count=len(df_ann),
+        active_trace_path=active_trace_path,
     )
 
 
-@bp.get("/predict/model-info")
-def predict_model_info():
-    model_path = request.args.get("model_path", "").strip()
-    if not model_path or not Path(model_path).exists():
-        return jsonify({"error": "Model not found"}), 404
-    meta = load_model_meta(model_path)
-    if not meta:
-        return jsonify({"error": "No metadata available for this model"}), 404
-    return jsonify(meta)
+@bp.get("/predict")
+def predict():
+    cfg = load_config()
+    csv_options = _trace_file_options()
+    selected_data_path = session.get("active_trace_path") or cfg.data_path
+    return render_template(
+        "cnn/predict.html",
+        cfg=cfg,
+        csv_options=csv_options,
+        selected_data_path=selected_data_path,
+    )
+
+
+@bp.post("/predict/run")
+def predict_run():
+    cfg = load_config()
+    data_path = request.form.get("data_path", "").strip() or cfg.data_path
+    model_file = request.files.get("model_file")
+
+    if not model_file:
+        return jsonify({"ok": False, "error": "No model file provided."}), 400
+    if not Path(data_path).exists():
+        return jsonify({"ok": False, "error": f"Data file not found: {data_path}"}), 400
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".keras")
+    try:
+        os.close(fd)
+        model_file.save(tmp_path)
+        predict_cfg = replace(cfg, data_path=data_path)
+        summary = predict_only(cfg=predict_cfg, model_path=tmp_path)
+        pred_path = Path(cfg.output_path)
+        predictions = pd.read_csv(pred_path).to_dict(orient="records") if pred_path.exists() else []
+        return jsonify({
+            "ok": True,
+            "summary": summary,
+            "predictions": predictions,
+            "group_by_col": cfg.group_by_col,
+            "data_path": data_path,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+def _extract_keras_input_shape(config: dict) -> tuple[int | None, int | None]:
+    """Parse a Keras config.json and return (max_len, num_channels) from the input layer."""
+    layers = config.get("config", {}).get("layers", [])
+    for layer in layers:
+        lc = layer.get("config", {})
+        # Keras 3 uses 'batch_shape'; Keras 2 uses 'batch_input_shape'
+        shape = lc.get("batch_input_shape") or lc.get("batch_shape") or lc.get("build_input_shape")
+        if shape and len(shape) >= 3:
+            return shape[1], shape[2]
+    return None, None
+
+
+@bp.post("/predict/model-meta")
+def predict_model_meta():
+    """Accept a .keras file upload and return its input shape without loading TF."""
+    model_file = request.files.get("model_file")
+    if not model_file:
+        return jsonify({"error": "No model file provided."}), 400
+    try:
+        buf = io.BytesIO(model_file.read())
+        with zipfile.ZipFile(buf) as zf:
+            if "config.json" not in zf.namelist():
+                return jsonify({"error": "Not a valid .keras file (missing config.json)"}), 400
+            config = json.loads(zf.read("config.json"))
+        max_len, num_channels = _extract_keras_input_shape(config)
+        if max_len is None:
+            return jsonify({"error": "Could not determine input shape from model config."}), 400
+        return jsonify({"max_len": max_len, "num_channels": num_channels, "channel_cols": []})
+    except zipfile.BadZipFile:
+        return jsonify({"error": "File is not a valid .keras archive."}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
 
 @bp.get("/predict/data-info")

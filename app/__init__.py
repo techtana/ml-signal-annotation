@@ -11,10 +11,8 @@ def create_app() -> Flask:
 
     from .routes.core import bp as core_bp
     from .routes.cnn import bp as cnn_bp
-    from .routes.pipeline_dashboard import bp as pipeline_bp
 
     app.register_blueprint(core_bp)
     app.register_blueprint(cnn_bp, url_prefix="/cnn")
-    app.register_blueprint(pipeline_bp, url_prefix="/pipeline")
 
     return app
