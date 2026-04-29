@@ -1,13 +1,13 @@
 (function () {
-  const { TRAINING_DATA_URL } = window.CNN_TRAIN_CFG;
+  'use strict';
+
   const META_KEY  = 'cnn-model-meta';
   const LOSS_KEY  = 'cnn-train-loss';
   const IDB_MODEL = 'indexeddb://cnn-latest';
 
-  // ── Preprocessing ────────────────────────────────────────────────────────
+  // ── Preprocessing ─────────────────────────────────────────────────────────
 
   function minMaxNormalize(channels) {
-    // channels: Array[n][nCh]  →  returns same shape, scaled to [0,1] per column
     const nCh = channels[0].length;
     const mins = Array(nCh).fill(Infinity);
     const maxs = Array(nCh).fill(-Infinity);
@@ -26,17 +26,17 @@
   }
 
   function trimAndPad(channels, trimRatio, maxLen) {
-    const n = channels.length;
+    const n    = channels.length;
     const trim = Math.floor(n * trimRatio);
     let sliced = channels.slice(trim, n - trim || n);
     if (!sliced.length) throw new Error('All rows trimmed — reduce trim_ratio');
     const normed = minMaxNormalize(sliced);
-    const last = normed[normed.length - 1];
+    const last   = normed[normed.length - 1];
     while (normed.length < maxLen) normed.push([...last]);
-    return normed; // [maxLen, nCh]
+    return normed;
   }
 
-  // Seeded Fisher-Yates shuffle (LCG, matches sklearn random_state semantics loosely)
+  // Seeded Fisher-Yates shuffle (LCG)
   function seededShuffle(arr, seed) {
     const a = [...arr];
     let s = (seed >>> 0) || 1;
@@ -48,7 +48,7 @@
     return a;
   }
 
-  // ── Model ────────────────────────────────────────────────────────────────
+  // ── Model ─────────────────────────────────────────────────────────────────
 
   function buildModel(maxLen, nChannels) {
     const model = tf.sequential({ layers: [
@@ -68,9 +68,7 @@
     const flat = new Float32Array(keys.length * maxLen * nChannels);
     let off = 0;
     for (const k of keys) {
-      for (const row of processed[k]) {
-        for (const v of row) flat[off++] = v;
-      }
+      for (const row of processed[k]) for (const v of row) flat[off++] = v;
     }
     const X = tf.tensor4d(flat, [keys.length, maxLen, nChannels, 1]);
     const y = tf.tensor1d(keys.map(k => {
@@ -80,7 +78,7 @@
     return { X, y };
   }
 
-  // ── Loss chart ───────────────────────────────────────────────────────────
+  // ── Loss chart ────────────────────────────────────────────────────────────
 
   const lossHistory = [], valLossHistory = [];
 
@@ -91,10 +89,8 @@
       { x: [], y: [], name: 'val loss',   mode: 'lines', line: { color: '#fd7e14', width: 1.5 } },
     ], {
       margin: { t: 10, r: 16, b: 60, l: 50 },
-      xaxis: { title: 'Epoch' },
-      yaxis: { title: 'MSE loss' },
-      showlegend: true,
-      legend: { orientation: 'h', x: 0, y: -0.35 },
+      xaxis: { title: 'Epoch' }, yaxis: { title: 'MSE loss' },
+      showlegend: true, legend: { orientation: 'h', x: 0, y: -0.35 },
     }, { responsive: true, displayModeBar: false });
   }
 
@@ -103,7 +99,7 @@
     Plotly.update('loss-chart', { x: [epochs, epochs], y: [lossHistory, valLossHistory] }, {}, [0, 1]);
   }
 
-  // ── Latest-run card ──────────────────────────────────────────────────────
+  // ── Latest-run card ───────────────────────────────────────────────────────
 
   function renderLatestRun(meta) {
     const el    = document.getElementById('latest-run-content');
@@ -115,7 +111,7 @@
       note.classList.add('d-none');
       return;
     }
-    const dt = meta.trainedAt ? new Date(meta.trainedAt).toLocaleString() : '—';
+    const dt   = meta.trainedAt ? new Date(meta.trainedAt).toLocaleString() : '—';
     const rows = [
       ['Trained',    dt],
       ['Samples',    meta.numSamples    ?? '—'],
@@ -133,14 +129,14 @@
     note.classList.remove('d-none');
   }
 
-  // Page load: restore latest-run card
+  // ── Page load: restore state ──────────────────────────────────────────────
+
   try {
     renderLatestRun(JSON.parse(localStorage.getItem(META_KEY)));
   } catch {
     renderLatestRun(null);
   }
 
-  // Page load: restore loss chart and progress from last run
   try {
     const stored = JSON.parse(localStorage.getItem(LOSS_KEY));
     if (stored && stored.loss && stored.loss.length) {
@@ -149,18 +145,36 @@
       const numEpochs = stored.numEpochs || lossHistory.length;
       const lastEpoch = lossHistory.length;
       document.getElementById('progress-card').classList.remove('d-none');
-      document.getElementById('progress-bar').style.width =
-        (lastEpoch / numEpochs * 100).toFixed(0) + '%';
-      document.getElementById('epoch-label').textContent =
-        `Epoch ${lastEpoch} / ${numEpochs}`;
-      document.getElementById('loss-label').textContent =
+      document.getElementById('progress-bar').style.width = (lastEpoch / numEpochs * 100).toFixed(0) + '%';
+      document.getElementById('epoch-label').textContent  = `Epoch ${lastEpoch} / ${numEpochs}`;
+      document.getElementById('loss-label').textContent   =
         `loss ${lossHistory[lastEpoch - 1].toFixed(5)} · val ${valLossHistory[lastEpoch - 1].toFixed(5)}`;
       initChart();
       updateChart();
     }
   } catch { /* no stored history */ }
 
-  // Download button
+  // Page load: show active trace name + annotations count + config summary
+  (async () => {
+    const cfg = CnnStore.loadConfig();
+    document.getElementById('epochs-batch').textContent = `${cfg.num_epochs} / ${cfg.batch_size}`;
+    try {
+      const active = await CnnStore.loadActiveTrace();
+      if (active) {
+        document.getElementById('active-trace-name').textContent = active.name;
+        document.getElementById('active-trace-row').classList.remove('d-none');
+        const annotations = CnnStore.loadAnnotations(active.name);
+        document.getElementById('annotated-count').textContent = Object.keys(annotations).length;
+      } else {
+        document.getElementById('annotated-count').textContent = '0';
+      }
+    } catch {
+      document.getElementById('annotated-count').textContent = '0';
+    }
+  })();
+
+  // ── Download button ───────────────────────────────────────────────────────
+
   document.getElementById('download-btn').addEventListener('click', async () => {
     try {
       const model = await tf.loadLayersModel(IDB_MODEL);
@@ -171,7 +185,7 @@
     }
   });
 
-  // ── Training ─────────────────────────────────────────────────────────────
+  // ── Training ──────────────────────────────────────────────────────────────
 
   document.getElementById('train-btn').addEventListener('click', async function () {
     const btn   = this;
@@ -185,9 +199,27 @@
 
     let data;
     try {
-      const r = await fetch(TRAINING_DATA_URL);
-      data = await r.json();
-      if (data.error) throw new Error(data.error);
+      const active = await CnnStore.loadActiveTrace();
+      if (!active) throw new Error('No active trace. Select a file on the Source page first.');
+      const cfgStore = CnnStore.loadConfig();
+      const { groups, channelCols, maxLen } = CsvParser.loadAndGroup(
+        active.csv, cfgStore.group_by_col, cfgStore.time_index_col, cfgStore.channel_cols
+      );
+      const annotations = CnnStore.loadAnnotations(active.name);
+      data = {
+        samples:      groups,
+        annotations,
+        channel_cols: channelCols,
+        max_len:      maxLen,
+        cfg: {
+          trim_ratio:   cfgStore.trim_ratio,
+          test_size:    cfgStore.test_size,
+          random_state: cfgStore.random_state,
+          num_epochs:   cfgStore.num_epochs,
+          batch_size:   cfgStore.batch_size,
+          group_by_col: cfgStore.group_by_col,
+        },
+      };
     } catch (e) {
       btn.disabled = false;
       btn.textContent = 'Run training';
@@ -199,9 +231,8 @@
     const { samples, annotations, channel_cols, max_len: maxLen, cfg } = data;
     const trimRatio = cfg.trim_ratio;
     const nChannels = channel_cols.length;
-    const keys = Object.keys(samples);
+    const keys      = Object.keys(samples);
 
-    // Preprocess
     const processed = {};
     try {
       for (const k of keys) {
@@ -224,9 +255,8 @@
       return;
     }
 
-    // Train / test split
-    const shuffled = seededShuffle(annotatedKeys, cfg.random_state);
-    const splitIdx = Math.max(1, Math.floor(shuffled.length * (1 - cfg.test_size)));
+    const shuffled  = seededShuffle(annotatedKeys, cfg.random_state);
+    const splitIdx  = Math.max(1, Math.floor(shuffled.length * (1 - cfg.test_size)));
     const trainKeys = shuffled.slice(0, splitIdx);
     const testKeys  = shuffled.slice(splitIdx).length ? shuffled.slice(splitIdx) : [shuffled[0]];
 
@@ -242,8 +272,8 @@
       const { X: X_test,  y: y_test  } = makeTensors(testKeys,  processed, annotations, maxLen, nChannels);
 
       await model.fit(X_train, y_train, {
-        epochs: cfg.num_epochs,
-        batchSize: cfg.batch_size,
+        epochs:         cfg.num_epochs,
+        batchSize:      cfg.batch_size,
         validationData: [X_test, y_test],
         callbacks: {
           onEpochEnd: async (epoch, logs) => {
@@ -251,15 +281,12 @@
             valLossHistory.push(logs.val_loss ?? logs.loss);
             const pct = ((epoch + 1) / cfg.num_epochs * 100).toFixed(0);
             document.getElementById('progress-bar').style.width = pct + '%';
-            document.getElementById('epoch-label').textContent =
-              `Epoch ${epoch + 1} / ${cfg.num_epochs}`;
-            document.getElementById('loss-label').textContent =
+            document.getElementById('epoch-label').textContent  = `Epoch ${epoch + 1} / ${cfg.num_epochs}`;
+            document.getElementById('loss-label').textContent   =
               `loss ${logs.loss.toFixed(5)} · val ${(logs.val_loss ?? logs.loss).toFixed(5)}`;
             updateChart();
             localStorage.setItem(LOSS_KEY, JSON.stringify({
-              loss: lossHistory,
-              valLoss: valLossHistory,
-              numEpochs: cfg.num_epochs,
+              loss: lossHistory, valLoss: valLossHistory, numEpochs: cfg.num_epochs,
             }));
             await tf.nextFrame();
           },
@@ -299,5 +326,8 @@
     btn.disabled = false;
     btn.textContent = 'Run training';
     renderLatestRun(meta);
+
+    // Refresh annotations count
+    document.getElementById('annotated-count').textContent = annotatedKeys.length;
   });
 })();
