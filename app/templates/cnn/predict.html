@@ -31,20 +31,38 @@
             </div>
           </div>
 
-          <!-- Drop zone for TF.js model files -->
-          <div id="drop-zone"
-               class="border rounded p-3 text-center"
-               style="border-style:dashed !important; cursor:pointer; min-height:72px;
-                      display:flex; flex-direction:column; align-items:center;
-                      justify-content:center; gap:2px;">
-            <div class="text-secondary small">Drop <code>model.json</code> + <code>model.weights.bin</code></div>
-            <div class="text-secondary small">
-              or <span class="text-primary" id="browse-link" style="cursor:pointer">browse</span>
+          <!-- Split drop zones for model files -->
+          <div class="row g-2">
+            <div class="col-6">
+              <div id="json-drop-zone" class="border rounded p-2 text-center h-100"
+                   style="border-style:dashed !important; cursor:pointer; min-height:72px;
+                          display:flex; flex-direction:column; align-items:center;
+                          justify-content:center; gap:2px;">
+                <div class="text-secondary small fw-semibold">Model JSON</div>
+                <div id="json-drop-label" class="text-secondary small">
+                  drop <code>.json</code> or <span class="text-primary" id="json-browse-link" style="cursor:pointer">browse</span>
+                </div>
+                <input type="file" id="json-file-input" accept=".json" class="d-none">
+              </div>
             </div>
-            <input type="file" id="model-file-input" accept=".json,.bin" multiple class="d-none">
+            <div class="col-6">
+              <div id="bin-drop-zone" class="border rounded p-2 text-center h-100"
+                   style="border-style:dashed !important; cursor:pointer; min-height:72px;
+                          display:flex; flex-direction:column; align-items:center;
+                          justify-content:center; gap:2px;">
+                <div class="text-secondary small fw-semibold">Weights</div>
+                <div id="bin-drop-label" class="text-secondary small">
+                  drop <code>.bin</code> or <span class="text-primary" id="bin-browse-link" style="cursor:pointer">browse</span>
+                </div>
+                <input type="file" id="bin-file-input" accept=".bin" multiple class="d-none">
+              </div>
+            </div>
           </div>
 
-          <div id="model-info"   class="mt-2 small"></div>
+          <div id="model-info" class="mt-2 small"></div>
+          <div id="use-browser-model-row" class="d-none mt-1">
+            <a href="#" id="use-browser-model-btn" class="small text-primary">&larr; Use browser model</a>
+          </div>
           <div id="compat-badge" class="mt-1"></div>
 
           <!-- Data CSV -->
@@ -56,6 +74,19 @@
                 {% if selected_data_path == path %}selected{% endif %}>{{ path }}</option>
             {% endfor %}
           </select>
+
+          <div id="csv-drop-zone"
+               class="border rounded p-3 text-center mt-2"
+               style="border-style:dashed !important; cursor:pointer; min-height:64px;
+                      display:flex; flex-direction:column; align-items:center;
+                      justify-content:center; gap:2px;">
+            <div class="text-secondary small">or drop a local <code>.csv</code> to load directly</div>
+            <div class="text-secondary small">
+              <span class="text-primary" id="csv-browse-link" style="cursor:pointer">browse</span>
+            </div>
+            <input type="file" id="csv-file-input" accept=".csv" class="d-none">
+          </div>
+          <div id="csv-file-info" class="mt-1 small d-none"></div>
 
           <button class="btn btn-primary mt-3" id="run-btn" disabled>Run prediction</button>
           <div id="predict-error" class="alert alert-danger mt-2 d-none" role="alert"></div>
@@ -131,357 +162,12 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
-(function () {
-  const TRACE_DATA_URL    = {{ url_for('cnn.trace_data') | tojson }};
-  const DEFAULT_DATA_PATH = {{ cfg.data_path | tojson }};
-  const META_KEY          = 'cnn-model-meta';
-  const IDB_MODEL         = 'indexeddb://cnn-latest';
-
-  // ── State ─────────────────────────────────────────────────────────────────
-  let activeModel    = null;   // tf.LayersModel
-  let modelMeta      = null;   // from localStorage or uploaded model.json
-  let traceData      = null;   // { samples, channel_cols, max_len, annotations, group_by_col }
-  let processedCache = {};     // key → preprocessed [maxLen, nCh] array
-  let predictions    = [];     // [{key, predicted_position}]
-  let groupByCol     = {{ cfg.group_by_col | tojson }};
-  let currentIdx     = 0;
-  let plotReady      = false;
-
-  // ── Preprocessing (mirrors Python pipeline) ───────────────────────────────
-
-  function minMaxNormalize(channels) {
-    const nCh = channels[0].length;
-    const mins = Array(nCh).fill(Infinity);
-    const maxs = Array(nCh).fill(-Infinity);
-    for (const row of channels) {
-      for (let c = 0; c < nCh; c++) {
-        if (row[c] < mins[c]) mins[c] = row[c];
-        if (row[c] > maxs[c]) maxs[c] = row[c];
-      }
-    }
-    return channels.map(row =>
-      row.map((v, c) => { const r = maxs[c] - mins[c]; return r === 0 ? 0 : (v - mins[c]) / r; })
-    );
-  }
-
-  function trimAndPad(channels, trimRatio, maxLen) {
-    const n = channels.length;
-    const trim = Math.floor(n * trimRatio);
-    let sliced = channels.slice(trim, n - trim || n);
-    if (!sliced.length) throw new Error('All rows trimmed');
-    const normed = minMaxNormalize(sliced);
-    const last = normed[normed.length - 1];
-    while (normed.length < maxLen) normed.push([...last]);
-    return normed;
-  }
-
-  // ── UI helpers ────────────────────────────────────────────────────────────
-
-  function setModelInfo(html)  { document.getElementById('model-info').innerHTML   = html; }
-  function setCompatBadge(html){ document.getElementById('compat-badge').innerHTML = html; }
-
-  function getDataPath() {
-    return (document.getElementById('data-path-select').value || '').trim() || DEFAULT_DATA_PATH;
-  }
-
-  function updateRunBtn() {
-    document.getElementById('run-btn').disabled = !(activeModel && traceData);
-  }
-
-  // ── Compat check ──────────────────────────────────────────────────────────
-
-  function checkCompat() {
-    if (!modelMeta || !traceData) { setCompatBadge(''); return; }
-    const mCh   = modelMeta.nChannels;
-    const mCols = modelMeta.channelCols || [];
-    const dCh   = traceData.channel_cols.length;
-    const dCols = traceData.channel_cols;
-    const chOk  = mCh === dCh;
-    const colsOk = !mCols.length ||
-      JSON.stringify([...dCols].sort()) === JSON.stringify([...mCols].sort());
-    if (chOk && colsOk)
-      setCompatBadge('<span class="badge bg-success">&#10003; Compatible</span>');
-    else if (!chOk)
-      setCompatBadge(`<span class="badge bg-danger">&#10007; Channel mismatch — data: ${dCh} ch, model: ${mCh} ch</span>`);
-    else
-      setCompatBadge(`<span class="badge bg-warning text-dark">&#9888; Column mismatch — data: [${dCols.join(', ')}] &middot; model: [${mCols.join(', ')}]</span>`);
-  }
-
-  // ── Load trace data ───────────────────────────────────────────────────────
-
-  async function loadTraceData(path) {
-    const r = await fetch(`${TRACE_DATA_URL}?path=${encodeURIComponent(path)}`);
-    const d = await r.json();
-    if (d.error) throw new Error(d.error);
-    traceData    = d;
-    groupByCol   = d.group_by_col || groupByCol;
-    processedCache = {};
-    checkCompat();
-    updateRunBtn();
-  }
-
-  document.getElementById('data-path-select').addEventListener('change', async () => {
-    try {
-      await loadTraceData(getDataPath());
-    } catch (e) {
-      setCompatBadge(`<span class="badge bg-warning text-dark">&#9888; ${e.message}</span>`);
-    }
-  });
-
-  // ── Model load helpers ────────────────────────────────────────────────────
-
-  async function setModel(model, meta) {
-    if (activeModel) activeModel.dispose();
-    activeModel = model;
-    modelMeta   = meta;
-    if (!meta) { setModelInfo('<span class="text-warning small">No model loaded.</span>'); updateRunBtn(); return; }
-
-    const parts = [];
-    if (meta.nChannels) parts.push(`${meta.nChannels} ch`);
-    if (meta.maxLen)    parts.push(`${meta.maxLen} steps`);
-    if (meta.trimRatio != null) parts.push(`trim ${meta.trimRatio}`);
-    setModelInfo(`<strong>${meta._source || 'Model'}</strong>` +
-      (parts.length ? ` <span class="text-muted">&middot; ${parts.join(' &middot; ')}</span>` : ''));
-    checkCompat();
-    updateRunBtn();
-  }
-
-  // ── Load from IndexedDB (TF.js native) ───────────────────────────────────
-
-  async function loadFromIDB() {
-    try {
-      const model = await tf.loadLayersModel(IDB_MODEL);
-      const stored = JSON.parse(localStorage.getItem(META_KEY) || 'null');
-      const meta = stored ? { ...stored, _source: `Browser model (${new Date(stored.trainedAt).toLocaleString()})` } : null;
-      await setModel(model, meta);
-      document.getElementById('model-stored-row').classList.remove('d-none');
-      document.getElementById('model-stored-badge').textContent = 'Browser model';
-      if (stored) {
-        document.getElementById('model-stored-detail').textContent =
-          new Date(stored.trainedAt).toLocaleString();
-      }
-    } catch {
-      // No model in IndexedDB yet — that's fine
-    }
-  }
-
-  document.getElementById('clear-model-btn').addEventListener('click', async e => {
-    e.preventDefault();
-    try { await tf.io.removeModel(IDB_MODEL); } catch {}
-    localStorage.removeItem(META_KEY);
-    if (activeModel) { activeModel.dispose(); activeModel = null; }
-    modelMeta = null;
-    document.getElementById('model-stored-row').classList.add('d-none');
-    setModelInfo('<span class="text-secondary small">Model cleared.</span>');
-    setCompatBadge('');
-    updateRunBtn();
-  });
-
-  // ── Drop zone / browse (TF.js model.json + model.weights.bin) ────────────
-
-  const dropZone  = document.getElementById('drop-zone');
-  const fileInput = document.getElementById('model-file-input');
-
-  document.getElementById('browse-link').addEventListener('click', () => fileInput.click());
-  dropZone.addEventListener('click', e => { if (e.target.id !== 'browse-link') fileInput.click(); });
-  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('bg-light'); });
-  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('bg-light'));
-  dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('bg-light'); handleFiles(e.dataTransfer.files); });
-  fileInput.addEventListener('change', e => handleFiles(e.target.files));
-
-  async function handleFiles(fileList) {
-    const files   = Array.from(fileList);
-    const jsonFile = files.find(f => f.name.endsWith('.json'));
-    const binFiles = files.filter(f => f.name.endsWith('.bin'));
-    if (!jsonFile) { setModelInfo('<span class="text-danger small">Select the model.json file (and .bin weights).</span>'); return; }
-
-    setModelInfo('<span class="text-secondary small">Loading uploaded model&hellip;</span>');
-    try {
-      const model  = await tf.loadLayersModel(tf.io.browserFiles([jsonFile, ...binFiles]));
-      const shape  = model.inputs[0].shape; // [null, maxLen, nChannels, 1]
-      const meta   = { maxLen: shape[1], nChannels: shape[2], channelCols: [], trimRatio: null,
-                       _source: `Uploaded: ${jsonFile.name}` };
-      await setModel(model, meta);
-      document.getElementById('model-stored-row').classList.add('d-none');
-    } catch (e) {
-      setModelInfo(`<span class="text-danger small">Error: ${e.message}</span>`);
-    }
-  }
-
-  // ── Run prediction ────────────────────────────────────────────────────────
-
-  document.getElementById('run-btn').addEventListener('click', async function () {
-    if (!activeModel || !traceData) return;
-    const btn   = this;
-    const errEl = document.getElementById('predict-error');
-    btn.disabled = true;
-    btn.textContent = 'Running…';
-    errEl.classList.add('d-none');
-
-    try {
-      const shape    = activeModel.inputs[0].shape; // [null, maxLen, nCh, 1]
-      const maxLen   = shape[1];
-      const nChannels = shape[2];
-      const trimRatio = (modelMeta && modelMeta.trimRatio != null) ? modelMeta.trimRatio : 0.1;
-      const keys     = Object.keys(traceData.samples);
-
-      // Preprocess
-      for (const k of keys) {
-        if (!processedCache[k]) {
-          processedCache[k] = trimAndPad(traceData.samples[k].channels, trimRatio, maxLen);
-        }
-      }
-
-      // Build input tensor
-      const flat = new Float32Array(keys.length * maxLen * nChannels);
-      let off = 0;
-      for (const k of keys) {
-        for (const row of processedCache[k]) for (const v of row) flat[off++] = v;
-      }
-      const X = tf.tensor4d(flat, [keys.length, maxLen, nChannels, 1]);
-
-      // Inference
-      const rawPreds = await tf.tidy(() => activeModel.predict(X)).data();
-      X.dispose();
-
-      const timeScale = (maxLen - 1) / maxLen;
-      predictions = keys.map((k, i) => ({
-        [groupByCol]: k,
-        predicted_position: rawPreds[i] * maxLen * timeScale,
-      }));
-
-      plotReady = false;
-      renderResults();
-    } catch (e) {
-      errEl.textContent = 'Prediction failed: ' + e.message;
-      errEl.classList.remove('d-none');
-    }
-    btn.disabled = false;
-    btn.textContent = 'Run prediction';
-    updateRunBtn();
-  });
-
-  // ── Results ───────────────────────────────────────────────────────────────
-
-  function renderResults() {
-    if (!predictions.length) return;
-    document.getElementById('results-thead-row').innerHTML =
-      `<th>${groupByCol}</th><th>Predicted position</th>`;
-    document.getElementById('results-tbody').innerHTML = predictions
-      .map(r => `<tr><td>${r[groupByCol]}</td><td>${r.predicted_position.toFixed(4)}</td></tr>`)
-      .join('');
-    document.getElementById('sample-select').innerHTML = predictions
-      .map(r => `<option value="${r[groupByCol]}">${r[groupByCol]}</option>`).join('');
-    document.getElementById('results-header').textContent =
-      `Results — ${predictions.length} sample${predictions.length !== 1 ? 's' : ''}`;
-    document.getElementById('results-card').classList.remove('d-none');
-    showView('table');
-  }
-
-  // Download predictions CSV
-  document.getElementById('dl-csv-btn').addEventListener('click', () => {
-    if (!predictions.length) return;
-    const header = `${groupByCol},predicted_position\n`;
-    const rows   = predictions.map(r => `${r[groupByCol]},${r.predicted_position}`).join('\n');
-    const blob   = new Blob([header + rows], { type: 'text/csv' });
-    const url    = URL.createObjectURL(blob);
-    const a      = document.createElement('a');
-    a.href = url; a.download = 'predictions.csv';
-    document.body.appendChild(a); a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  });
-
-  // ── Plot view ─────────────────────────────────────────────────────────────
-
-  function showView(view) {
-    const isTable = view === 'table';
-    document.getElementById('view-table').classList.toggle('d-none', !isTable);
-    document.getElementById('view-plot').classList.toggle('d-none', isTable);
-    document.getElementById('btn-table').className = 'btn btn-sm ' + (isTable ? 'btn-primary' : 'btn-outline-secondary');
-    document.getElementById('btn-plot').className  = 'btn btn-sm ' + (!isTable ? 'btn-primary' : 'btn-outline-secondary');
-    if (!isTable && !plotReady) { currentIdx = 0; syncControls(); renderTrace(currentIdx); }
-  }
-
-  function syncControls() {
-    const keys = predictions.map(r => String(r[groupByCol]));
-    document.getElementById('sample-select').value           = keys[currentIdx];
-    document.getElementById('btn-prev').disabled              = currentIdx === 0;
-    document.getElementById('btn-next').disabled              = currentIdx === keys.length - 1;
-    document.getElementById('sample-counter').textContent     = `${currentIdx + 1} / ${keys.length}`;
-  }
-
-  function stepSample(delta) {
-    const next = currentIdx + delta;
-    if (next < 0 || next >= predictions.length) return;
-    currentIdx = next;
-    syncControls();
-    renderTrace(currentIdx);
-  }
-
-  function renderTrace(idx) {
-    const row  = predictions[idx];
-    const key  = String(row[groupByCol]);
-    const pred = row.predicted_position;
-
-    if (!traceData || !traceData.samples[key]) return;
-    const shape    = activeModel ? activeModel.inputs[0].shape : [null, null, null, 1];
-    const maxLen   = shape[1] || traceData.max_len;
-    const trimRatio = (modelMeta && modelMeta.trimRatio != null) ? modelMeta.trimRatio : 0.1;
-
-    const processed = processedCache[key] ||
-      trimAndPad(traceData.samples[key].channels, trimRatio, maxLen);
-    processedCache[key] = processed;
-
-    const xVals = Array.from({ length: processed.length }, (_, i) => i);
-    const nCh   = processed[0].length;
-    const cols  = traceData.channel_cols;
-
-    const traces = Array.from({ length: nCh }, (_, c) => ({
-      x: xVals,
-      y: processed.map(row => row[c]),
-      name: cols[c] || `ch${c}`,
-      type: 'scatter', mode: 'lines', line: { width: 1.5 },
-    }));
-
-    const predIdx = pred / ((maxLen - 1) / maxLen);  // convert back to index space
-    const shapes  = [{ type: 'line', x0: predIdx, x1: predIdx, y0: 0, y1: 1,
-      xref: 'x', yref: 'paper', line: { color: '#0d6efd', width: 2, dash: 'dash' } }];
-    const annots  = [{ x: predIdx, y: 0.98, xref: 'x', yref: 'paper',
-      text: `pred: ${pred.toFixed(2)}`, showarrow: false,
-      font: { color: '#0d6efd', size: 11 }, xanchor: 'left', yanchor: 'top',
-      bgcolor: 'rgba(255,255,255,0.7)', borderpad: 2 }];
-
-    Plotly.react('trace-plot', traces, {
-      margin: { t: 16, r: 16, b: 80, l: 50 },
-      showlegend: true, legend: { orientation: 'h', x: 0, y: -0.25 },
-      xaxis: { title: 'Step' },
-      yaxis: { title: 'Normalized value', range: [-0.05, 1.05] },
-      shapes, annotations: annots,
-    }, { responsive: true });
-    plotReady = true;
-  }
-
-  document.getElementById('btn-table').addEventListener('click', () => showView('table'));
-  document.getElementById('btn-plot').addEventListener('click',  () => showView('plot'));
-  document.getElementById('btn-prev').addEventListener('click',  () => stepSample(-1));
-  document.getElementById('btn-next').addEventListener('click',  () => stepSample(1));
-  document.getElementById('sample-select').addEventListener('change', e => {
-    currentIdx = predictions.findIndex(r => String(r[groupByCol]) === e.target.value);
-    if (currentIdx < 0) currentIdx = 0;
-    syncControls();
-    renderTrace(currentIdx);
-  });
-
-  // ── Page init ─────────────────────────────────────────────────────────────
-
-  (async () => {
-    await loadFromIDB();
-    try {
-      await loadTraceData(getDataPath());
-    } catch { /* non-fatal */ }
-  })();
-})();
-</script>
+<script>window.CNN_PREDICT_CFG = {
+  TRACE_DATA_URL:    {{ url_for('cnn.trace_data') | tojson }},
+  DEFAULT_DATA_PATH: {{ cfg.data_path | tojson }},
+  GROUP_BY_COL:      {{ cfg.group_by_col | tojson }},
+  TIME_INDEX_COL:    {{ cfg.time_index_col | tojson }},
+  CHANNEL_COLS:      {{ (cfg.channel_cols or []) | tojson }}
+};</script>
+<script src="{{ url_for('static', filename='js/predict.js') }}"></script>
 {% endblock %}

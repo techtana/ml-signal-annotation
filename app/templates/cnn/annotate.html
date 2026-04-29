@@ -41,10 +41,22 @@
     </div>
   </div>
 
+  <!-- Trace CSV drop zone -->
+  <div id="trace-drop-zone"
+       class="border rounded p-2 text-center mb-3"
+       style="border-style:dashed !important; cursor:pointer;">
+    <span class="text-secondary small">
+      Drop a trace <code>.csv</code> to switch files, or
+      <span class="text-primary" id="trace-browse-link" style="cursor:pointer">browse</span>
+    </span>
+    <input type="file" id="trace-file-input" accept=".csv" class="d-none">
+    <div id="trace-upload-status" class="small mt-1 d-none"></div>
+  </div>
+
   {% if not ready %}
     <div class="alert alert-warning">
-      This page needs an input CSV at <code>{{ cfg.data_path }}</code>. Update the path in
-      <a href="{{ url_for('cnn.settings') }}">settings</a> or add the file.
+      No active trace file. Drop a CSV above, or go to
+      <a href="{{ url_for('cnn.source') }}">Source</a> to select one.
     </div>
   {% else %}
     {% if review %}
@@ -94,69 +106,18 @@
 {% endblock %}
 
 {% block scripts %}
+<script>window.CNN_ANNOTATE_CFG = {
+  UPLOAD_TRACE_URL: {{ url_for('cnn.upload_trace') | tojson }},
+  ready: {{ ready | tojson }},
   {% if ready %}
-    <script>
-      const key = {{ key|tojson }};
-      const x = {{ x|tojson }};
-      const series = {{ series|tojson }};
-      const existingLabel = {{ existing_label|tojson }};
-
-      const traces = series.map(s => ({
-        x,
-        y: s.y,
-        name: s.name,
-        type: "scatter",
-        mode: "lines",
-        line: { width: 1.5 }
-      }));
-
-      const shapes = [];
-      if (existingLabel !== null) {
-        shapes.push({
-          type: "line",
-          x0: existingLabel,
-          x1: existingLabel,
-          y0: 0,
-          y1: 1,
-          xref: "x",
-          yref: "paper",
-          line: { color: "#dc3545", width: 2, dash: "dot" }
-        });
-      }
-
-      Plotly.newPlot("plot", traces, {
-        margin: { t: 10, r: 10, b: 40, l: 45 },
-        showlegend: true,
-        legend: { orientation: "h" },
-        xaxis: { title: "Time" },
-        yaxis: { title: "Normalized value" },
-        shapes
-      }, { responsive: true });
-
-      function postLabel(xVal) {
-        return fetch({{ url_for('cnn.annotate_label')|tojson }}, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ key, label: xVal })
-        }).then(r => r.json());
-      }
-
-      const plot = document.getElementById("plot");
-      plot.on("plotly_click", (evt) => {
-        const xVal = evt.points?.[0]?.x;
-        if (xVal === undefined || xVal === null) return;
-        postLabel(xVal).then((resp) => {
-          if (resp.ok) window.location.reload();
-          else alert(resp.error || "Failed to save label");
-        });
-      });
-
-      window.addEventListener("keydown", (e) => {
-        if (e.key?.toLowerCase() === "s") {
-          fetch({{ url_for('cnn.annotate_skip')|tojson }}, { method: "POST" }).then(() => window.location.reload());
-        }
-      });
-    </script>
+  key:               {{ key | tojson }},
+  x:                 {{ x | tojson }},
+  series:            {{ series | tojson }},
+  existingLabel:     {{ existing_label | tojson }},
+  ANNOTATE_LABEL_URL: {{ url_for('cnn.annotate_label') | tojson }},
+  ANNOTATE_SKIP_URL:  {{ url_for('cnn.annotate_skip') | tojson }}
   {% endif %}
+};</script>
+<script src="{{ url_for('static', filename='js/annotate.js') }}"></script>
 {% endblock %}
 

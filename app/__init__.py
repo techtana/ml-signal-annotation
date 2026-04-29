@@ -10,7 +10,7 @@ def create_app() -> Flask:
     )
 
     from .routes.core import bp as core_bp
-    from .routes.cnn import bp as cnn_bp
+    from .routes.cnn import bp as cnn_bp  # package: app/routes/cnn/
 
     app.register_blueprint(core_bp)
     app.register_blueprint(cnn_bp, url_prefix="/cnn")

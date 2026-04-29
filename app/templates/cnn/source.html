@@ -24,11 +24,17 @@
                 <option value="{{ path }}" {% if active_trace_path == path %}selected{% endif %}>{{ path }}</option>
               {% endfor %}
             </select>
-
-            <div class="text-center text-secondary my-3">or</div>
-
-            <label class="form-label">Upload trace CSV</label>
-            <input class="form-control" type="file" name="trace_file" accept=".csv,text/csv" />
+            <div id="csv-drop-zone" class="border rounded p-3 text-center mt-2"
+                 style="border-style:dashed !important; cursor:pointer; min-height:72px;
+                        display:flex; flex-direction:column; align-items:center;
+                        justify-content:center; gap:4px;">
+              <div id="csv-drop-label" class="text-secondary small">
+                Or, drop a <code>.csv</code> here, or
+                <span class="text-primary" id="csv-browse-link" style="cursor:pointer">browse</span>
+              </div>
+              <input type="file" id="trace-file-input" name="trace_file"
+                     accept=".csv,text/csv" class="d-none">
+            </div>
             <div class="form-text">
               Uploaded files are used temporarily for your current session and are not kept as app-owned files.
             </div>
@@ -80,4 +86,37 @@
       </div>
     </div>
   </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const zone  = document.getElementById('csv-drop-zone');
+  const input = document.getElementById('trace-file-input');
+  const label = document.getElementById('csv-drop-label');
+
+  function setFile(file) {
+    try {
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      input.files = dt.files;
+    } catch {}
+    label.innerHTML = `<span class="badge bg-secondary">${file.name}</span>`;
+  }
+
+  document.getElementById('csv-browse-link').addEventListener('click', () => input.click());
+  zone.addEventListener('click', e => { if (e.target.id !== 'csv-browse-link') input.click(); });
+  zone.addEventListener('dragover',  e => { e.preventDefault(); zone.classList.add('bg-light'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('bg-light'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault();
+    zone.classList.remove('bg-light');
+    const f = e.dataTransfer.files[0];
+    if (f) setFile(f);
+  });
+  input.addEventListener('change', e => {
+    if (e.target.files[0]) setFile(e.target.files[0]);
+  });
+})();
+</script>
 {% endblock %}
